@@ -233,6 +233,8 @@ def stage(args):
         payload = work / 'payload'; payload.mkdir()
         run('tar', '--xattrs', '--acls', '--numeric-owner', '-xzf', package, '-C', payload)
         verify_payload(payload, manifest)
+        # Recovery only needs the extracted payload; free the archive's space on HOME.
+        package.unlink()
         info = {'id': work.name, 'version': manifest['version'], 'sha256': expected,
                 'root_uuid': root_info['uuid'], 'home_uuid': home_info['uuid'],
                 'boot_uuid': boot_info['uuid'], 'manifest': manifest}
@@ -330,6 +332,8 @@ def apply(root, boot, home, work, manifest):
             target = root / name[5:]
         else: continue
         if digest(target) != sha: raise ValueError(f'installed checksum mismatch: {name}')
+    # Record the installed version.
+    (root / 'etc/konkr-release').write_text(manifest['version'] + '\n')
     os.sync()
     install_kernel(work / 'next-KERNEL', boot)
 

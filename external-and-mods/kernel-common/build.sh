@@ -20,7 +20,8 @@
 # DTB and boots the one matching "Set device model".
 # The image builder patches the real root=PARTUUID= into the cmdline.
 #
-# Must run on aarch64 Linux (native build). Tested host: Ubuntu 24.04 in Colima.
+# Runs on aarch64 Linux (native, tested on Ubuntu 24.04 in Colima), or on
+# x86_64 as a cross build through build-gcc15.sh.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,11 +57,16 @@ JOBS="${JOBS:-$(nproc)}"
 log() { printf '[kernel-%s] %s\n' "$KNAME" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
-[[ "$(uname -m)" == aarch64 ]] || die "build on aarch64 Linux (Colima VM), not $(uname -m)"
+# Native on aarch64, or cross from anything else with CROSS_COMPILE set
+# (build-gcc15.sh does that on an x86_64 host).
+if [[ "$(uname -m)" != aarch64 ]]; then
+  [[ -n "${CROSS_COMPILE:-}" ]] || die "build on aarch64 Linux, or set CROSS_COMPILE (e.g. aarch64-linux-gnu-)"
+  export ARCH=arm64 CROSS_COMPILE
+fi
 
 check_deps() {
   local missing=() c
-  for c in make gcc bc bison flex python3 curl tar xz gzip cpio kmod patch perl rsync; do
+  for c in make gcc ${CROSS_COMPILE:+${CROSS_COMPILE}gcc} bc bison flex python3 curl tar xz gzip cpio kmod patch perl rsync; do
     command -v "$c" >/dev/null || missing+=("$c")
   done
   [[ -f /usr/include/openssl/ssl.h ]] || missing+=(libssl-dev)

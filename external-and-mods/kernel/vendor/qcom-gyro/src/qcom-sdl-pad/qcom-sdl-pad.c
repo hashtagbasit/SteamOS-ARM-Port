@@ -46,8 +46,11 @@
 
 #define DS_VENDOR 0x054c
 #define DS_PRODUCT 0x0ce6
-#define DS_ACCEL_RES_PER_G 8192
-#define DS_GYRO_RES_PER_DEG_S 1024
+/* Must match the calibration we answer feature report 0x05 with
+ * (dualsense_blobs.h: +-10000 per 1 G, +-10000 per 500 deg/s). Steam and
+ * hid-playstation scale by it; 1024/deg/s read as ~51x too fast. */
+#define DS_ACCEL_RES_PER_G 10000
+#define DS_GYRO_RES_PER_DEG_S 20
 
 #define REPORT_HZ 100
 
@@ -87,6 +90,7 @@ typedef struct {
 	int pad_fd;
 	int dsu_fd;
 	gboolean grab_pad;
+	gboolean motion_only; /* no native pad: an IMU-only DualSense for InputPlumber */
 	gboolean verbose;
 	GMainLoop *loop;
 	struct dualsense_input_report report;
@@ -408,7 +412,7 @@ open_uhid_dualsense (PadBridge *bridge, GError **error)
 	/* Keep Sony VID/PID so hid-playstation binds and exposes Motion Sensors.
 	 * Name is what SDL/Cemu show — match the handheld pad identity. */
 	g_strlcpy ((char *) ev.u.create2.name,
-		   "AYN Odin2 Gamepad",
+		   bridge->motion_only ? "AYN Odin2 IMU" : "AYN Odin2 Gamepad",
 		   sizeof (ev.u.create2.name));
 	g_strlcpy ((char *) ev.u.create2.phys, "qcom-sdl-pad", sizeof (ev.u.create2.phys));
 	g_strlcpy ((char *) ev.u.create2.uniq, uniq, sizeof (ev.u.create2.uniq));
@@ -428,8 +432,11 @@ open_uhid_dualsense (PadBridge *bridge, GError **error)
 	}
 
 	bridge->uhid_fd = fd;
-	g_message ("Created AYN Odin2 Gamepad UHID (DualSense HID) uniq=%s", uniq);
-	expose_dualsense_hidraw (bridge, uniq);
+	g_message ("Created %s UHID (DualSense HID) uniq=%s",
+		   (const char *) ev.u.create2.name, uniq);
+	/* Motion-only: InputPlumber (root) takes the hidraw, nobody else needs it. */
+	if (!bridge->motion_only)
+		expose_dualsense_hidraw (bridge, uniq);
 	/* Evdev duplicates: only hide when explicitly requested. Steam Game Mode
 	 * should stop this service instead (qcom-sdl-pad-gamescope). */
 	if (g_getenv ("QCOM_SDL_PAD_HIDE_EVDEV"))
@@ -662,7 +669,7 @@ build_report (PadBridge *bridge)
 	r->buttons[2] = b2;
 	r->buttons[3] = 0;
 
-	/* DualSense motion: accel in units of 1/8192 G, gyro 1/1024 deg/s. */
+	/* DualSense motion, in the units the calibration report declares. */
 	r->accel[0] = (uint16_t) clamp_i16 (bridge->accel_g[0] * DS_ACCEL_RES_PER_G);
 	r->accel[1] = (uint16_t) clamp_i16 (bridge->accel_g[1] * DS_ACCEL_RES_PER_G);
 	r->accel[2] = (uint16_t) clamp_i16 (bridge->accel_g[2] * DS_ACCEL_RES_PER_G);
@@ -841,6 +848,8 @@ main (int argc, char **argv)
 	GOptionEntry entries[] = {
 		{ "no-grab", 0, 0, G_OPTION_ARG_NONE, &no_grab,
 		  "Do not EVIOCGRAB / chmod-hide the Odin gamepad (debug)", NULL },
+		{ "motion-only", 0, 0, G_OPTION_ARG_NONE, &bridge.motion_only,
+		  "Leave the gamepad alone; only carry motion (an InputPlumber gyro source)", NULL },
 		{ "verbose", 'v', 0, G_OPTION_ARG_NONE, &bridge.verbose, "Verbose", NULL },
 		{ NULL }
 	};
@@ -853,10 +862,11 @@ main (int argc, char **argv)
 		return 2;
 	}
 	g_option_context_free (ctx);
-	bridge.grab_pad = !no_grab;
+	bridge.grab_pad = !no_grab && !bridge.motion_only;
 
-	bridge.pad_fd = find_odin_gamepad (&bridge);
-	if (bridge.pad_fd < 0) {
+	if (!bridge.motion_only)
+		bridge.pad_fd = find_odin_gamepad (&bridge);
+	if (!bridge.motion_only && bridge.pad_fd < 0) {
 		g_printerr ("AYN Odin2/Thor gamepad not found\n");
 		return 1;
 	}
@@ -888,7 +898,8 @@ main (int argc, char **argv)
 
 	bridge.loop = g_main_loop_new (NULL, FALSE);
 	g_unix_fd_add (bridge.uhid_fd, G_IO_IN | G_IO_ERR | G_IO_HUP, uhid_ready, &bridge);
-	g_unix_fd_add (bridge.pad_fd, G_IO_IN | G_IO_ERR | G_IO_HUP, pad_ready, &bridge);
+	if (bridge.pad_fd >= 0)
+		g_unix_fd_add (bridge.pad_fd, G_IO_IN | G_IO_ERR | G_IO_HUP, pad_ready, &bridge);
 	g_unix_fd_add (bridge.dsu_fd, G_IO_IN | G_IO_ERR | G_IO_HUP, dsu_ready, &bridge);
 	g_timeout_add (1000 / REPORT_HZ, tick_cb, &bridge);
 	g_unix_signal_add (SIGINT, shutdown_cb, &bridge);
@@ -905,7 +916,8 @@ main (int argc, char **argv)
 	restore_native_pad (&bridge);
 	restore_hidraw (&bridge);
 	destroy_uhid (&bridge);
-	close (bridge.pad_fd);
+	if (bridge.pad_fd >= 0)
+		close (bridge.pad_fd);
 	close (bridge.dsu_fd);
 	g_free (bridge.pad_dev_path);
 	g_free (bridge.hidraw_path);

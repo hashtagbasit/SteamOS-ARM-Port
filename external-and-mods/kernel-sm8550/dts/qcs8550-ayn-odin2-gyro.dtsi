@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Gyro for the AYN Odin 2 / Mini / Portal (included from their dts appends,
+ * not from qcs8550-ayn-common.dtsi, so the Thor stays as it was).
+ *
+ * The IMU hangs off the ADSP's Sensor Core. hexagonrpcd starts the sensors
+ * PD, which needs a remote heap handed to the ADSP and PDR for the sensors
+ * service (patch 0052). No qcom,pd-type here: on the Odin 2 it kept the
+ * sensors service from showing up.
+ */
+#include <dt-bindings/firmware/qcom,scm.h>
+
+&{/reserved-memory} {
+	adsp_rpc_remote_heap_mem: adsp-rpc-remote-heap {
+		compatible = "shared-dma-pool";
+		alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
+		alignment = <0x0 0x400000>;
+		size = <0x0 0xc00000>;
+		reusable;
+	};
+};
+
+&remoteproc_adsp {
+	glink-edge {
+		fastrpc {
+			memory-region = <&adsp_rpc_remote_heap_mem>;
+			qcom,fastrpc-adsp-sensors-pdr;
+			qcom,vmids = <QCOM_SCM_VMID_LPASS QCOM_SCM_VMID_ADSP_HEAP>;
+		};
+	};
+};

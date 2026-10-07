@@ -77,6 +77,8 @@
 #define ODIN2_CALIBRATION_FILE "/userdata/system/qcom-sensors/odin2/motion-calibration.ini"
 #define THOR_ACCEL_CALIBRATION_FRAME "thor-dsu-v3"
 #define ODIN2_ACCEL_CALIBRATION_FRAME "odin2-dsu-v3"
+#define PORTAL_CALIBRATION_FILE "/userdata/system/qcom-sensors/odin2portal/motion-calibration.ini"
+#define PORTAL_ACCEL_CALIBRATION_FRAME "portal-dsu-v1"
 
 /* Locally administered stable identifier: 02:41:59:4e:54:01 (AYN + Thor). */
 #define DEVICE_MAC 0x0241594e5401ULL
@@ -93,6 +95,7 @@ typedef struct {
 typedef enum {
 	MOTION_PROFILE_THOR,
 	MOTION_PROFILE_ODIN2,
+	MOTION_PROFILE_PORTAL,
 } MotionProfile;
 
 typedef struct {
@@ -172,6 +175,8 @@ select_motion_profile (MotionServer *server, const gchar *requested, GError **er
 	if (profile == NULL || g_str_equal (profile, "auto")) {
 		if (device_tree_has_compatible ("ayn,thor"))
 			profile = "thor";
+		else if (device_tree_has_compatible ("ayn,odin2portal"))
+			profile = "portal";
 		else if (device_tree_has_compatible ("ayn,odin2"))
 			profile = "odin2";
 		else {
@@ -195,15 +200,24 @@ select_motion_profile (MotionServer *server, const gchar *requested, GError **er
 		server->calibration_frame = ODIN2_ACCEL_CALIBRATION_FRAME;
 		return TRUE;
 	}
+	if (g_str_equal (profile, "portal")) {
+		server->profile = MOTION_PROFILE_PORTAL;
+		server->profile_name = "portal";
+		server->device_name = "AYN Odin 2 Portal";
+		server->calibration_frame = PORTAL_ACCEL_CALIBRATION_FRAME;
+		return TRUE;
+	}
 
 	g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
-		     "Unknown motion profile '%s' (expected auto, thor, or odin2)", profile);
+		     "Unknown motion profile '%s' (expected auto, thor, odin2, or portal)", profile);
 	return FALSE;
 }
 
 static const gchar *
 default_calibration_file (const MotionServer *server)
 {
+	if (server->profile == MOTION_PROFILE_PORTAL)
+		return PORTAL_CALIBRATION_FILE;
 	return server->profile == MOTION_PROFILE_ODIN2 ?
 		ODIN2_CALIBRATION_FILE : THOR_CALIBRATION_FILE;
 }
@@ -646,6 +660,12 @@ accelerometer_measurement (SSCSensorAccelerometer *sensor,
 			sample[0] = x / EARTH_GRAVITY;
 			sample[1] = -z / EARTH_GRAVITY;
 			sample[2] = y / EARTH_GRAVITY;
+		} else if (server->profile == MOTION_PROFILE_PORTAL) {
+			/* The Portal's LSM6DSV sits turned: top, left and out of the
+			 * screen are +X, +Y and +Z (checked upright and lying flat). */
+			sample[0] = y / EARTH_GRAVITY;
+			sample[1] = z / EARTH_GRAVITY;
+			sample[2] = x / EARTH_GRAVITY;
 		} else {
 			sample[0] = -y / EARTH_GRAVITY;
 			sample[1] = z / EARTH_GRAVITY;
@@ -683,6 +703,11 @@ transform_gyro (MotionServer *server, const float raw[3], float output[3])
 			output[0] = -corrected[0] * RAD_TO_DEG;
 			output[1] = -corrected[2] * RAD_TO_DEG;
 			output[2] = corrected[1] * RAD_TO_DEG;
+		} else if (server->profile == MOTION_PROFILE_PORTAL) {
+			/* Axial-vector counterpart of the Portal accel (Y,Z,X) map. */
+			output[0] = -corrected[1] * RAD_TO_DEG;
+			output[1] = corrected[2] * RAD_TO_DEG;
+			output[2] = corrected[0] * RAD_TO_DEG;
 		} else {
 			output[0] = corrected[1] * RAD_TO_DEG;
 			output[1] = corrected[2] * RAD_TO_DEG;
@@ -1332,7 +1357,7 @@ main (int argc, char **argv)
 		{ "calibration-file", 0, 0, G_OPTION_ARG_FILENAME, &calibration_file,
 		  "Persistent gyro calibration file", "FILE" },
 		{ "profile", 0, 0, G_OPTION_ARG_STRING, &profile,
-		  "Device coordinate profile (auto, thor, or odin2)", "PROFILE" },
+		  "Device coordinate profile (auto, thor, odin2, or portal)", "PROFILE" },
 		{ "calibration-samples", 0, 0, G_OPTION_ARG_INT, &calibration_samples,
 		  "Stationary samples required for calibration", "COUNT" },
 		{ "gyro-deadzone", 0, 0, G_OPTION_ARG_DOUBLE, &server.gyro_deadzone,

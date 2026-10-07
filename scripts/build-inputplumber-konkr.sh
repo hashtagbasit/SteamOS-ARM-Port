@@ -12,6 +12,8 @@ git -C "$SRC" checkout --detach "$REF"
 git -C "$SRC" apply "$CACHE/0001-bound-ayaneo-haptics-polling.patch"
 # Rumble effects stop after their length; Steam's trackpad haptics become motor pulses.
 git -C "$SRC" apply "$CACHE/0002-ayaneo-haptics-timed-rumble-and-steam-pulses.patch"
+# Manage the uhid "AYN Odin2 IMU" (qcom-sdl-pad --motion-only) as a gyro source.
+git -C "$SRC" apply "$CACHE/0003-manage-ayn-odin2-imu-uhid.patch"
 (cd "$SRC" && cargo +1.93.1 build --release --locked -j"${BUILD_JOBS:-4}")
 install -m755 "$SRC/target/release/inputplumber" "$CACHE/inputplumber-0.81.0-konkr"
 (cd "$CACHE" && sha256sum inputplumber-0.81.0-konkr > inputplumber-0.81.0-konkr.sha256)

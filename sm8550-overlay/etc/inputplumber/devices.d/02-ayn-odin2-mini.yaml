@@ -43,6 +43,20 @@ source_devices:
       handler: event*
     capability_map_id: ayn_mini_mcu
     passthrough: false
+  # Gyro / accel (Odin 2 / Portal, with the gyro kernel): qcom-imu-pad.service
+  # runs qcom-sdl-pad --motion-only, a DualSense over uhid named
+  # "AYN Odin2 IMU" with idle buttons and sticks, so only its motion is used.
+  # Targets with gyro: deck-uhid, ds5-edge. Absent without the service.
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x054c
+      product_id: 0x0ce6
+      name: "AYN Odin2 IMU*"
+  - group: gamepad
+    blocked: true
+    evdev:
+      name: "AYN Odin2 IMU*"
+      handler: event*
 
 options:
   auto_manage: true

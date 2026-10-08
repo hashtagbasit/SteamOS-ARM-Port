@@ -1052,7 +1052,9 @@ def icon_for(e: dict) -> str:
     url = ""
     try:
         kind, _, where = spec.partition(":")
-        if kind == "flathub":
+        if kind in ("http", "https"):
+            url = spec
+        elif kind == "flathub":
             url = http_json(f"https://flathub.org/api/v2/appstream/{where}").get("icon") or ""
         elif kind == "github":
             url = f"https://github.com/{where}.png?size=256"
@@ -1457,7 +1459,40 @@ def drop_shortcut(app_id: str) -> None:
 def shortcut_spec(app_id: str) -> dict:
     e = entry(app_id)
     return {"app": app_id, "name": e["title"], "exe": str(BIN / app_id), "dir": str(HOME),
-            "icon": icon_for(e), "options": "", "tag": "Emulators" if e.get("kind") == "emulator" else "Apps"}
+            "icon": icon_for(e), "options": "", "art": f"hub:{app_id}" if e.get("art") else "",
+            "tag": "Emulators" if e.get("kind") == "emulator" else "Apps"}
+
+
+# Steam's artwork slots for a shortcut (SetCustomArtworkForApp's asset type)
+# and the file each one takes in userdata/<id>/config/grid/.
+ART_SLOTS = {"grid": (0, "{appid}p"), "hero": (1, "{appid}_hero"), "logo": (2, "{appid}_logo"),
+             "wide": (3, "{appid}")}
+
+
+def app_art(app_id: str) -> list[dict]:
+    """A catalog app's own Steam artwork (its "art" URLs), fetched once and
+    cached: [{"slot", "type", "ext", "path"}]."""
+    e = entry(app_id)
+    cache = CACHE / "art" / f"hub-{app_id}"
+    out = []
+    for slot, url in (e.get("art") or {}).items():
+        if slot not in ART_SLOTS:
+            continue
+        ext = url.rsplit(".", 1)[-1].lower()
+        dest = cache / f"{slot}.{ext}"
+        if not dest.exists():
+            try:
+                cache.mkdir(parents=True, exist_ok=True)
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=20) as r, open(dest.with_suffix(".part"), "wb") as fh:
+                    shutil.copyfileobj(r, fh)
+                os.replace(dest.with_suffix(".part"), dest)
+            except Exception as exc:
+                log(f"art for {app_id} ({slot}): {exc}")
+                dest.with_suffix(".part").unlink(missing_ok=True)
+                continue
+        out.append({"slot": slot, "type": ART_SLOTS[slot][0], "ext": ext, "path": str(dest)})
+    return out
 
 
 def steam_pending() -> dict:
@@ -1578,6 +1613,15 @@ def flush_shortcuts_offline() -> None:
                           "IsHidden": 0, "AllowDesktopConfig": 1, "AllowOverlay": 1, "OpenVR": 0,
                           "Devkit": 0, "DevkitGameID": "", "DevkitOverrideAppID": 0, "LastPlayTime": 0,
                           "FlatpakAppID": "", "tags": {"0": spec["tag"]}})
+            if spec.get("art", "").startswith("hub:"):
+                grid = Path(cfg_dir) / "grid"
+                for a in app_art(spec["art"][4:]):
+                    try:
+                        grid.mkdir(exist_ok=True)
+                        name = ART_SLOTS[a["slot"]][1].format(appid=appid & 0xFFFFFFFF)
+                        shutil.copyfile(a["path"], grid / f"{name}.{a['ext']}")
+                    except OSError as exc:
+                        log(f"art for {spec['app']}: {exc}")
             steam_made(spec["app"], appid & 0xFFFFFFFF)
         for r in pending["remove"]:
             steam_gone(r["app"])
@@ -1712,6 +1756,8 @@ def status() -> dict:
             rec = None
         if rec and rec.get("how") == "plugin" and not (PLUGINS / rec.get("dir", "-")).is_dir():
             rec = None
+        if e.get("retired") and not rec:
+            continue        # replaced by another app: kept only so old installs still run and uninstall
         builtin = e["sources"][0]["kind"] == "builtin" and Path(e["sources"][0]["exec"]).exists()
         heavy = "heavy_below" in e and chip_rank(dev["chip"]) < chip_rank(e["heavy_below"])
         best = next((s for s in e["sources"] if fits(s.get("when"), dev)), None)

@@ -587,7 +587,31 @@
      "ref": "com.moonlight_stream.Moonlight"
     }
    ],
-   "video_accel": {}
+   "video_accel": {},
+   "retired": "artmoon",
+   "note": "Replaced by ArtMoon."
+  },
+  {
+   "id": "artmoon",
+   "title": "ArtMoon",
+   "plays": "stream games from your PC",
+   "kind": "app",
+   "note": "For touch: Controller Settings, Default set, add Touchscreen Native Support",
+   "icon": "https://raw.githubusercontent.com/justjoseorg/ArtMoon/main/app/res/artmoon.png",
+   "art": {
+    "grid": "https://raw.githubusercontent.com/justjoseorg/ArtMoon/main/app/deploy/linux/steam/library_600x900.jpg",
+    "hero": "https://raw.githubusercontent.com/justjoseorg/ArtMoon/main/app/deploy/linux/steam/library_hero.jpg",
+    "logo": "https://raw.githubusercontent.com/justjoseorg/ArtMoon/main/app/deploy/linux/steam/logo.png",
+    "wide": "https://raw.githubusercontent.com/justjoseorg/ArtMoon/main/app/deploy/linux/steam/header.jpg"
+   },
+   "sources": [
+    {
+     "kind": "github",
+     "repo": "justjoseorg/ArtMoon",
+     "file": "^ArtMoon-[0-9.]+-aarch64\\.AppImage$"
+    }
+   ],
+   "save_as": "ArtMoon.AppImage"
   },
   {
    "id": "chiaki",

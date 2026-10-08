@@ -358,7 +358,13 @@ ART_FILES = [(0, "library_600x900_2x.jpg"), (1, "library_hero.jpg"), (2, "logo.p
 
 def art(title: str) -> dict:
     """Artwork from the Steam store when the game is sold there (most PC games,
-    many console ports): the closest title match, or nothing."""
+    many console ports): the closest title match, or nothing. "hub:<id>" is a
+    catalog app's own artwork instead."""
+    if title.startswith("hub:"):
+        assets = [{"type": a["type"], "ext": a["ext"],
+                   "data": base64.b64encode(Path(a["path"]).read_bytes()).decode()}
+                  for a in hub.app_art(title[4:])]
+        return {"found": bool(assets), "assets": assets}
     q = urllib.parse.quote(title)
     try:
         res = hub.http_json(f"https://store.steampowered.com/api/storesearch/?term={q}&l=english&cc=US")

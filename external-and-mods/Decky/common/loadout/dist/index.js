@@ -127,6 +127,7 @@ async function syncShortcuts() {
             if (!appid) continue;
             try { SteamClient.Apps.SetShortcutName(appid, s.name); } catch (e) {}
             try { if (s.options) SteamClient.Apps.SetShortcutLaunchOptions(appid, s.options); } catch (e) {}
+            try { if (s.icon) SteamClient.Apps.SetShortcutIcon(appid, s.icon); } catch (e) {}
             if (s.compat) {
                 try { SteamClient.Apps.SpecifyCompatTool(appid, s.compat); } catch (e) {}
                 if (s.app.startsWith("custom:")) await E.compat_done(s.app.slice(7));

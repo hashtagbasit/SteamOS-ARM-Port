@@ -23,7 +23,7 @@ Item {
     // Apps worth having that aren't installed yet: one tap gets them, and
     // they pin themselves when done.
     readonly property var suggested: hub.filter(function (a) {
-        return a.kind === "app" && !a.installed && a.available && ["vesktop", "signal", "moonlight", "chiaki"].indexOf(a.id) >= 0
+        return a.kind === "app" && !a.installed && a.available && ["vesktop", "signal", "artmoon", "chiaki"].indexOf(a.id) >= 0
     }).slice(0, 3)
     signal open(string page)
 

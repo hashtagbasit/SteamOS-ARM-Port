@@ -47,13 +47,21 @@ done
 # Force-off leaves .crash; Steam then opens -child-update-ui (the wheel)
 # and logs "Looks like steam didn't shutdown cleanly".
 rm -f "${STEAMROOT}/.crash" "${STEAMROOT}/steam.pid" 2>/dev/null || true
-printf '%s\n' \
-  'BootStrapperInhibitAll=enable' \
-  'BootStrapperForceSelfUpdate=disable' \
-  'BootStrapperInhibitClientChecksum=enable' \
-  'BootStrapperInhibitBootstrapperChecksum=enable' \
-  'BootStrapperInhibitUpdateOnLaunch=enable' \
-  >"${STEAMROOT}/steam.cfg" 2>/dev/null || true
+# Client self-updates are blocked by default (x86 CDN builds break the handheld).
+# Opt in with `touch ${STEAMROOT}/.allow-client-updates` (or
+# STEAM_ALLOW_CLIENT_UPDATES=1) to follow the selected client beta channel,
+# e.g. the arm64 build shared with the Steam Frame.
+if [[ -e "${STEAMROOT}/.allow-client-updates" || "${STEAM_ALLOW_CLIENT_UPDATES:-0}" == "1" ]]; then
+  rm -f "${STEAMROOT}/steam.cfg" "${STEAMROOT}/${STEAM_RT_ARM64}/steam.cfg" 2>/dev/null || true
+else
+  printf '%s\n' \
+    'BootStrapperInhibitAll=enable' \
+    'BootStrapperForceSelfUpdate=disable' \
+    'BootStrapperInhibitClientChecksum=enable' \
+    'BootStrapperInhibitBootstrapperChecksum=enable' \
+    'BootStrapperInhibitUpdateOnLaunch=enable' \
+    >"${STEAMROOT}/steam.cfg" 2>/dev/null || true
+fi
 # Version 0 / "no bootstrapper found" keeps Gamepad UI on the update spinner.
 if [[ ! -s "${STEAMROOT}/steam.inf" ]]; then
   ver=1788652215

@@ -1,0 +1,16 @@
+[Unit]
+Description=Qualcomm ADSP sensor hub (gyro / accel) for the AYN Odin 2 family
+ConditionPathExists=/dev/fastrpc-adsp
+After=sound.target
+
+[Service]
+Environment=LD_LIBRARY_PATH=/usr/lib/qcom-gyro/lib
+ExecCondition=/usr/lib/qcom-gyro/supported
+ExecStart=/usr/lib/qcom-gyro/qcom-sensors-start.sh
+StateDirectory=qcom-gyro
+KillMode=control-group
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

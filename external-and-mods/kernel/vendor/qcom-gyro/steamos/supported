@@ -1,0 +1,3 @@
+#!/bin/sh
+# The gyro units only run on the Odin 2 family (the Thor needs its own PD setup).
+tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'ayn,odin2(mini|portal)?'

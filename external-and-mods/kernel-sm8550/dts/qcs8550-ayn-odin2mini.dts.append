@@ -1,0 +1,5 @@
+/*
+ * SteamOS ARM additions for the AYN Odin 2 Mini (appended to ROCKNIX's
+ * qcs8550-ayn-odin2mini.dts by kernel-common/build.sh).
+ */
+#include "qcs8550-ayn-odin2-gyro.dtsi"

@@ -38,3 +38,5 @@
 		};
 	};
 };
+
+#include "qcs8550-ayn-odin2-gyro.dtsi"

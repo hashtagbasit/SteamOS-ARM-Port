@@ -1,0 +1,17 @@
+[Unit]
+Description=Qualcomm motion bridge (SSC gyro/accel -> DSU :26760)
+Requires=qcom-sensors.service
+After=qcom-sensors.service
+
+[Service]
+Environment=LD_LIBRARY_PATH=/usr/lib/qcom-gyro/lib
+ExecCondition=/usr/lib/qcom-gyro/supported
+ExecStartPre=/bin/sh -c 'for i in $(seq 60); do /usr/lib/qcom-gyro/bin/qrtr-lookup | grep -q "^ *400 " && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/lib/qcom-gyro/bin/qcom-motion --profile auto --no-evdev \
+  --calibration-file /var/lib/qcom-gyro/state/motion-calibration.ini
+StateDirectory=qcom-gyro
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

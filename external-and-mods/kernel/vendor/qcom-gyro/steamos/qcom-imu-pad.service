@@ -1,0 +1,14 @@
+[Unit]
+Description=Gyro for InputPlumber: motion-only DualSense ("AYN Odin2 IMU")
+Requires=qcom-motion.service
+After=qcom-motion.service
+Before=inputplumber.service
+
+[Service]
+ExecCondition=/usr/lib/qcom-gyro/supported
+ExecStart=/usr/lib/qcom-gyro/bin/qcom-sdl-pad --motion-only
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

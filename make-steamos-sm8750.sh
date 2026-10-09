@@ -6,6 +6,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "${ROOT}/versions.env" ]] && source "${ROOT}/versions.env"
 SCRIPTS="${ROOT}/scripts"
 WORKDIR="${STEAMOS_WORK:-${ROOT}/sm8750-work}"
 R="${STEAMOS_ROOTFS:-${WORKDIR}/rootfs}"
@@ -76,23 +77,24 @@ while [[ $# -gt 0 ]]; do
 done
 
 STEAMOS_BUILD="${STEAMOS_BUILD:-20261002.6232440}"
-STEAMOS_BUNDLE="deckard-${STEAMOS_BUILD}-${STEAMOS_VERSION:-0.5.3}"
-STEAMOS_URL="https://steamdeck-images.steamos.cloud/vr/${STEAMOS_BUILD}"
+STEAMOS_VERSION="${STEAMOS_VERSION:-0.5.3}"
+STEAMOS_BUNDLE="${STEAMOS_BUNDLE:-deckard-${STEAMOS_BUILD}-${STEAMOS_VERSION}}"
+STEAMOS_URL="${STEAMOS_URL:-https://steamdeck-images.steamos.cloud/vr/${STEAMOS_BUILD}}"
 
-# SM8750_KERNEL=prebuilt (default): ROCKNIX's binary release, no tracefs.
-# SM8750_KERNEL=source: build via kernel-sm8750/build.sh, has tracefs.
-# Needs a native aarch64 host (e.g. the Odin 3 itself).
+# SM8750_KERNEL=prebuilt: ROCKNIX binary release, no tracefs.
+# SM8750_KERNEL=source: build via kernel-sm8750/build.sh or use staged build, has tracefs.
+# Default: uses from-source/SteamOS kernel if staged in kernel-sm8750-src, else prebuilt.
 ensure_kernel() {
-  if [[ "${SM8750_KERNEL:-prebuilt}" == source ]]; then
-    local kwork="${SM8750_KERNEL_WORK:-${WORKDIR}/kernel-sm8750-src}"
-    local kcur="${kwork}/output/current"
-    if [[ -L "$kcur" && -f "$(readlink -f "$kcur")/boot/KERNEL" ]]; then
-      log "SM8750 from-source kernel already built in ${kwork}"
+  local ksrc_work="${SM8750_KERNEL_WORK:-${WORKDIR}/kernel-sm8750-src}"
+  local ksrc_cur="${ksrc_work}/output/current"
+  if [[ "${SM8750_KERNEL:-}" == source || ( -z "${SM8750_KERNEL:-}" && -L "$ksrc_cur" && -f "$(readlink -f "$ksrc_cur")/boot/KERNEL" ) ]]; then
+    if [[ -L "$ksrc_cur" && -f "$(readlink -f "$ksrc_cur")/boot/KERNEL" ]]; then
+      log "SM8750 from-source kernel found in ${ksrc_work}"
     else
       log "Building SM8750 kernel from source (kernel-sm8750/build.sh)"
-      WORK="$kwork" bash "${MOD}/kernel-sm8750/build.sh"
+      WORK="$ksrc_work" bash "${MOD}/kernel-sm8750/build.sh"
     fi
-    KOUT="$(readlink -f "$kcur")"
+    KOUT="$(readlink -f "$ksrc_cur")"
     return 0
   fi
   if [[ -f "${KOUT}/boot/KERNEL" && -d "${KOUT}/modules/7.2.0" ]]; then
@@ -141,23 +143,60 @@ ensure_official_rootfs() {
 # its glibc, with Oryon flags (SDORYON1, armv8.6-a): the 8 Gen 2 build uses
 # armv9-a, which the 8 Elite's cores don't implement.
 ensure_box64() {
+  [[ "$SKIP_APPLY" -eq 1 ]] && return 0
   local mark="${R}/usr/local/share/box64-target"
   if [[ -x "${R}/usr/local/bin/box64" && "$(cat "$mark" 2>/dev/null)" == SDORYON1 ]]; then
     log "Box64 (SDORYON1) already in rootfs"
     return 0
   fi
+  local box64_src="${BOX64_SRC:-${WORKDIR}/box64}"
+  if [[ ! -d "${box64_src}/.git" && ! -f "${box64_src}/CMakeLists.txt" ]]; then
+    log "Cloning ptitSeb/box64 into ${box64_src}"
+    git clone --depth 1 https://github.com/ptitSeb/box64 "${box64_src}"
+  fi
   log "Building Box64 (SDORYON1) inside the Frame rootfs"
-  sudo_run env BOX64_TARGET=SDORYON1 BOX64_SRC="${BOX64_SRC:-${WORKDIR}/box64}" \
+  sudo_run env BOX64_TARGET=SDORYON1 BOX64_SRC="${box64_src}" \
     "${SCRIPTS}/build-box64-in-rootfs.sh" "${R}"
+  sudo_run mkdir -p "${R}/usr/local/share"
   echo SDORYON1 | sudo_run tee "$mark" >/dev/null
 }
 
+ensure_steam_seed() {
+  [[ "$SKIP_APPLY" -eq 1 ]] && return 0
+  local seed="${WORKDIR}/steam-arm-seed"
+  if [[ -n "${STEAM_ARM_SEED:-}" && -d "${STEAM_ARM_SEED}" ]]; then
+    seed="${STEAM_ARM_SEED}"
+  fi
+
+  if "${SCRIPTS}/install-complete-steam-client.sh" --check "${seed}" 2>/dev/null; then
+    log "Steam ARM seed ready at ${seed}"
+    export STEAM_ARM_SEED="${seed}"
+    return 0
+  fi
+
+  if [[ "$(uname -m)" == "aarch64" ]]; then
+    log "No complete Steam seed found. Bootstrapping headlessly on aarch64..."
+    if [[ -f /etc/resolv.conf ]]; then
+      sudo_run cp -L /etc/resolv.conf "${R}/etc/resolv.conf" 2>/dev/null || true
+    fi
+    "${SCRIPTS}/bootstrap-steam-arm-seed.sh" "${R}" "${seed}" "${STEAM_ARM_CHANNEL:-steamdeck_publicbeta}"
+    export STEAM_ARM_SEED="${seed}"
+    return 0
+  fi
+
+  log "WARN: Not on aarch64 ($(uname -m)) and no complete seed available; skipping headless bootstrap"
+}
 apply_mods() {
   [[ "$SKIP_APPLY" -eq 1 ]] && { log "Skipping apply-overlays"; return 0; }
   [[ -x "${SCRIPTS}/apply-overlays-sm8750.sh" ]] || die "missing scripts/apply-overlays-sm8750.sh"
   log "Applying SM8750 Odin 3 kernel / Turnip Adreno 830 / overlays"
+  local mesa="${MESA_STACK:-}"
+  if [[ -z "${mesa}" && -d "${WORKDIR}/mesa-stack/aarch64" ]]; then
+    mesa="${WORKDIR}/mesa-stack"
+    log "Auto-detected Mesa stack at ${mesa}"
+  fi
   sudo_run env KERNEL_OUT="${KOUT}" STEAMOS_ROOTFS="${R}" STEAMOS_WORK="${WORKDIR}" \
-    MESA_STACK="${MESA_STACK:-}" ${STEAM_ARM_SEED:+STEAM_ARM_SEED="${STEAM_ARM_SEED}"} \
+    MESA_STACK="${mesa}" ${STEAM_ARM_SEED:+STEAM_ARM_SEED="${STEAM_ARM_SEED}"} \
     ${GAMESCOPE_BUILD:+GAMESCOPE_BUILD="${GAMESCOPE_BUILD}"} \
     "${SCRIPTS}/apply-overlays-sm8750.sh"
 }
@@ -249,7 +288,6 @@ build_image() {
   command -v sfdisk >/dev/null || die "sfdisk missing"
   command -v mkfs.vfat >/dev/null || die "mkfs.vfat missing"
   command -v mkfs.ext4 >/dev/null || die "mkfs.ext4 missing"
-  command -v uuidgen >/dev/null || die "uuidgen missing"
   [[ -x "${R}/usr/bin/bash" ]] || die "rootfs not ready"
   [[ -f "${KOUT}/boot/KERNEL" ]] || die "missing ${KOUT}/boot/KERNEL"
 
@@ -271,9 +309,11 @@ build_image() {
   fi
 
   total_mib=$((BOOT_MIB + ROOT_MIB + HOME_MIB + 2))
-  disk_id="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
-  root_uuid="$(uuidgen)"
-  home_uuid="$(uuidgen)"
+  # Deterministic disk and filesystem UUIDs for predictable partition tables and fstab.
+  # Can be overridden via environment variables DISK_ID, ROOT_UUID, HOME_UUID.
+  disk_id="${DISK_ID:-${DEFAULT_DISK_ID:-53544541}}"
+  root_uuid="${ROOT_UUID:-${DEFAULT_ROOT_UUID:-e8992e59-b131-41b3-a9d0-fa52e1e3b5e4}}"
+  home_uuid="${HOME_UUID:-${DEFAULT_HOME_UUID:-4b2452c9-d2b4-4e78-9588-e0ce26d8ee1c}}"
 
   log "Creating ${IMG} (${total_mib} MiB sparse)"
   log "  p1 BOOT ${BOOT_MIB}M vfat"
@@ -314,9 +354,11 @@ EOF
   log "Formatting filesystems"
   # Fixed FAT serial so the cmdline can find this BOOT by UUID.
   local boot_serial="${disk_id:0:8}"
+  local root_hash_seed="${ROOT_HASH_SEED:-${DEFAULT_ROOT_HASH_SEED:-a1b2c3d4-e5f6-7890-abcd-ef1234567890}}"
+  local home_hash_seed="${HOME_HASH_SEED:-${DEFAULT_HOME_HASH_SEED:-b2c3d4e5-f6a7-8901-bcde-f12345678901}}"
   sudo_run mkfs.vfat -F 32 -n BOOT -i "${boot_serial}" "${boot_dev}"
-  sudo_run mkfs.ext4 -q -F -L root -U "${root_uuid}" -m 1 "${root_dev}"
-  sudo_run mkfs.ext4 -q -F -L home -U "${home_uuid}" -m 0 "${home_dev}"
+  sudo_run mkfs.ext4 -q -F -L root -U "${root_uuid}" -E "hash_seed=${root_hash_seed}" -m 1 "${root_dev}"
+  sudo_run mkfs.ext4 -q -F -L home -U "${home_uuid}" -E "hash_seed=${home_hash_seed}" -m 0 "${home_dev}"
 
   mkdir -p "${MNT}/boot" "${MNT}/root" "${MNT}/home"
   sudo_run mount "${boot_dev}" "${MNT}/boot"
@@ -346,6 +388,8 @@ EOF
     --exclude='/home/*' \
     "${R}/" "${MNT}/root/"
   restore_image_suid "${MNT}/root"
+  # Each new installation must generate its own D-Bus/network identity on first boot.
+  sudo_run truncate -s 0 "${MNT}/root/etc/machine-id" 2>/dev/null || true
 
   log "Writing fstab for 3-partition layout"
   sudo_run tee "${MNT}/root/etc/fstab" >/dev/null <<EOF
@@ -368,6 +412,7 @@ EOF
   cleanup_image
   trap - EXIT INT TERM
 
+
   log "================================================================="
   log "SUCCESS: SteamOS ARM for AYN Odin 3 built:"
   log "Image: ${IMG} ($((total_mib)) MiB)"
@@ -379,6 +424,7 @@ EOF
 mkdir -p "${WORKDIR}"
 ensure_kernel
 ensure_official_rootfs
+ensure_steam_seed
 ensure_box64
 apply_mods
 build_image

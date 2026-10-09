@@ -68,6 +68,14 @@ check_deps() {
   if ((${#missing[@]})); then
     die "missing: ${missing[*]}  (sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev python3 curl xz-utils cpio kmod patch rsync dwarves)"
   fi
+  # SM8750 (Qualcomm Oryon) requires GCC 15+ for ARMv9.2-A / RELR relocations
+  if [[ "$SOC" == "sm8750" ]]; then
+    local gcc_major
+    gcc_major="$(gcc -dumpversion | cut -d. -f1)"
+    if [[ "$gcc_major" -lt 15 ]]; then
+      die "GCC ${gcc_major} is too old for SM8750. SM8750 requires GCC 15+ (e.g. Fedora 43 container via build-gcc15.sh) to avoid early-boot relocation crashes on Qualcomm Oryon cores."
+    fi
+  fi
 }
 
 fetch() {
@@ -312,8 +320,9 @@ build_initramfs() {
   # bootlog.txt to the FAT partition. The configuration verified to boot on
   # the Pocket FIT; also the only log available when the screen stays black.
   local bb=/bin/busybox d="${WORK}/initramfs"
+  [[ -x "$bb" ]] || bb="$(type -p busybox 2>/dev/null || echo /bin/busybox)"
   file "$bb" 2>/dev/null | grep -q "statically linked" \
-    || die "need a static busybox (apt install busybox-static)"
+    || die "need a static busybox ($bb is not statically linked; install busybox-static on Debian/Ubuntu or busybox on Fedora)"
   rm -rf "$d"; mkdir -p "$d/root/bin" "$d/root/dev" "$d/root/proc" "$d/root/sys"
   cp "$bb" "$d/root/bin/busybox"
   install -m0755 "${HERE}/initramfs/init" "$d/root/init"

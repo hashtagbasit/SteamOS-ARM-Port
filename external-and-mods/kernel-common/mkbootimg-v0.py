@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import os
 import struct
 from pathlib import Path
 
@@ -50,7 +51,12 @@ def main() -> None:
     if len(cmd) >= 512:
         raise SystemExit(f"cmdline too long ({len(cmd)} >= 512)")
 
-    today = datetime.date.today()
+    if "SOURCE_DATE_EPOCH" in os.environ:
+        today = datetime.datetime.fromtimestamp(
+            int(os.environ["SOURCE_DATE_EPOCH"]), tz=datetime.timezone.utc
+        ).date()
+    else:
+        today = datetime.date.today()
     sha = hashlib.sha1()
     for blob in (kernel, ramdisk, b""):
         sha.update(blob)

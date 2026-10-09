@@ -16,6 +16,9 @@ KOUT="$(readlink -f "${KERNEL_OUT:-${WORKDIR}/kernel-sm8750-release/7.2.0}")"
 KREL="$(basename "$KOUT")"
 STOCK="${R}/opt/stock-steamos"
 MESA_SO="${SM8750_MESA_SO:-${SM8750_OVL}/usr/lib/libvulkan_freedreno.so}"
+if [[ -z "${MESA_STACK:-}" && -d "${WORKDIR}/mesa-stack/aarch64" ]]; then
+  MESA_STACK="${WORKDIR}/mesa-stack"
+fi
 LOG="${WORKDIR}/odin3-apply.log"
 
 die() { echo "ERROR: $*" >&2; exit 1; }

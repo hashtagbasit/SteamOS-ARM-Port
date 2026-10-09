@@ -7,19 +7,30 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PORT_ROOT="$(cd "${HERE}/../.." && pwd)"
 IMAGE="${IMAGE:-fedora:43}"
-MOUNT="${MOUNT:-/work}"
+MOUNT="${MOUNT:-${PORT_ROOT}}"
 BUSYBOX="${BUSYBOX:-/bin/busybox}"
-[[ "$HERE" == "$MOUNT"/* ]] || { echo "$HERE is not under $MOUNT" >&2; exit 1; }
-[[ -x "$BUSYBOX" ]] || { echo "no static busybox at $BUSYBOX" >&2; exit 1; }
 
-PKGS="file gcc make bc bison flex python3 curl tar xz gzip cpio kmod patch perl rsync
-      openssl-devel elfutils-libelf-devel dwarves diffutils findutils hostname which git"
+PKGS="file gcc gcc-c++ make bc bison flex python3 curl tar xz gzip cpio kmod patch perl rsync
+      openssl-devel elfutils-libelf-devel dwarves diffutils findutils hostname which git busybox"
 env_args=()
 for v in SM8550_RECIPE SM8650_RECIPE WORK ROCKNIX_DIR JOBS OUT_BASE LOCALVERSION DTBS_OVERRIDE; do
   [[ -n "${!v:-}" ]] && env_args+=(-e "$v=${!v}")
 done
-exec docker run --rm -v "$MOUNT:$MOUNT" -v "$BUSYBOX:/bin/busybox:ro" "${env_args[@]}" \
+
+mount_args=(-v "$MOUNT:$MOUNT")
+if [[ -n "${WORK:-}" && -d "$WORK" && "$WORK" != "$MOUNT"* ]]; then
+  mount_args+=(-v "$WORK:$WORK")
+fi
+if [[ -n "${ROCKNIX_DIR:-}" && -d "$ROCKNIX_DIR" && "$ROCKNIX_DIR" != "$MOUNT"* ]]; then
+  mount_args+=(-v "$ROCKNIX_DIR:$ROCKNIX_DIR")
+fi
+if [[ -x "$BUSYBOX" ]]; then
+  mount_args+=(-v "$BUSYBOX:/bin/busybox:ro")
+fi
+
+exec docker run --rm "${mount_args[@]}" -w "$PWD" "${env_args[@]}" \
   "$IMAGE" bash -c "
     set -e
     dnf -q -y install $(echo $PKGS) >/dev/null

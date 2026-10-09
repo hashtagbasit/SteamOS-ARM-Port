@@ -14,6 +14,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "${ROOT}/versions.env" ]] && source "${ROOT}/versions.env"
 SCRIPTS="${ROOT}/scripts"
 # Rootfs, mounts and image must live on a Linux filesystem (not exFAT).
 WORKDIR="${STEAMOS_WORK:-/work}"
@@ -349,7 +350,6 @@ build_image() {
   command -v sfdisk >/dev/null || die "sfdisk missing"
   command -v mkfs.vfat >/dev/null || die "mkfs.vfat missing"
   command -v mkfs.ext4 >/dev/null || die "mkfs.ext4 missing"
-  command -v uuidgen >/dev/null || die "uuidgen missing"
   [[ -x "${R}/usr/bin/bash" ]] || die "rootfs not ready"
   [[ -f "${KOUT}/boot/KERNEL" ]] || die "missing ${KOUT}/boot/KERNEL"
 
@@ -373,10 +373,11 @@ build_image() {
   fi
 
   total_mib=$((BOOT_MIB + ROOT_MIB + HOME_MIB + 2))
-  # MBR disk id → root PARTUUID=<id>-02 (the kernel resolves it without an initramfs)
-  disk_id="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
-  root_uuid="$(uuidgen)"
-  home_uuid="$(uuidgen)"
+  # Deterministic disk and filesystem UUIDs for predictable partition tables and fstab.
+  # Can be overridden via environment variables DISK_ID, ROOT_UUID, HOME_UUID.
+  disk_id="${DISK_ID:-${DEFAULT_DISK_ID:-53544541}}"
+  root_uuid="${ROOT_UUID:-${DEFAULT_ROOT_UUID:-e8992e59-b131-41b3-a9d0-fa52e1e3b5e4}}"
+  home_uuid="${HOME_UUID:-${DEFAULT_HOME_UUID:-4b2452c9-d2b4-4e78-9588-e0ce26d8ee1c}}"
 
   log "Creating ${IMG} (${total_mib} MiB sparse)"
   log "  p1 BOOT ${BOOT_MIB}M vfat"
@@ -409,9 +410,13 @@ EOF
 
   trap cleanup_image EXIT
 
-  sudo_run mkfs.vfat -F 32 -n BOOT "${boot_dev}"
-  sudo_run mkfs.ext4 -F -L root -U "${root_uuid}" -m 1 "${root_dev}"
-  sudo_run mkfs.ext4 -F -L home -U "${home_uuid}" -m 1 "${home_dev}"
+  local root_hash_seed="${ROOT_HASH_SEED:-${DEFAULT_ROOT_HASH_SEED:-a1b2c3d4-e5f6-7890-abcd-ef1234567890}}"
+  local home_hash_seed="${HOME_HASH_SEED:-${DEFAULT_HOME_HASH_SEED:-b2c3d4e5-f6a7-8901-bcde-f12345678901}}"
+  local boot_serial="${disk_id:0:8}"
+  sudo_run mkfs.vfat -F 32 -n BOOT -i "${boot_serial}" "${boot_dev}"
+  sudo_run mkfs.ext4 -F -L root -U "${root_uuid}" -E "hash_seed=${root_hash_seed}" -m 1 "${root_dev}"
+  sudo_run mkfs.ext4 -F -L home -U "${home_uuid}" -E "hash_seed=${home_hash_seed}" -m 1 "${home_dev}"
+
 
   mkdir -p "${MNT}/boot" "${MNT}/root" "${MNT}/home"
   sudo_run mount "${root_dev}" "${MNT}/root"

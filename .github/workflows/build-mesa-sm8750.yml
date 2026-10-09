@@ -1,0 +1,120 @@
+# Build the Mesa 26.2.3 graphics stack for Adreno 830 (Odin 3 / SM8750 / Snapdragon 8 Elite).
+#
+# Produces: mesa-sm8750.tar.zst containing 4 slices:
+#   aarch64/  — on-device Turnip Vulkan + Zink OpenGL
+#   x86_64/   — FEX x86_64 guest libraries
+#   i386/     — FEX 32-bit guest libraries
+#   android/  — Lepton (Valve Android container) Vulkan driver
+#
+# The aarch64 slice is built inside the SteamOS rootfs via bwrap, so
+# this workflow must download and extract the rootfs first.
+# Manual dispatch only — Mesa changes are infrequent.
+name: Build SM8750 (8 Elite) Mesa Stack
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+
+    env:
+      MESA_WORK: ${{ github.workspace }}/mesa-work
+
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
+            /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift \
+            /usr/local/share/boost /opt/az
+          sudo docker image prune -af 2>/dev/null || true
+          echo "=== After cleanup ==="
+          df -h /
+
+      - name: Configure kernel settings for bwrap
+        run: |
+          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-requests python3-zstandard python3-venv python3-packaging \
+            bubblewrap squashfs-tools rsync zstd unzip \
+            clang lld llvm \
+            gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+            gcc-i686-linux-gnu g++-i686-linux-gnu \
+            libc6-dev-i386-cross \
+            ninja-build pkg-config glslang-tools
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Load version manifest
+        run: |
+          if [ -f versions.env ]; then
+            sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+                -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                -e 's/"//g' -e "s/'//g" versions.env >> "$GITHUB_ENV"
+          else
+            echo "STEAMOS_BUILD=20261002.6232440" >> "$GITHUB_ENV"
+            echo "STEAMOS_BUNDLE=deckard-20261002.6232440-0.5.3" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Python venv (Meson >= 1.4)
+        run: |
+          python3 -m venv "$MESA_WORK/venv"
+          "$MESA_WORK/venv/bin/pip" install meson mako pyyaml packaging ply
+
+      # Download the SteamOS rootfs — required as the build environment
+      # for the native aarch64 Mesa build (bwrap mounts it as /).
+      - name: Download SteamOS rootfs
+        run: |
+          STEAMOS_URL="https://steamdeck-images.steamos.cloud/vr/${STEAMOS_BUILD}"
+          echo "Downloading RAUC bundle ..."
+          curl -fL -o bundle.raucb "${STEAMOS_URL}/${STEAMOS_BUNDLE}.raucb"
+          echo "Extracting casync index ..."
+          unsquashfs -q -d bundle/ bundle.raucb
+          sha=$(sed -n '/^\[image.rootfs\]/,/^\[/{s/^sha256=//p}' bundle/manifest.raucm)
+          echo "Reassembling rootfs.img (SHA256: $sha) ..."
+          python3 scripts/extract_rootfs.py \
+            --caibx bundle/rootfs.img.caibx \
+            --output rootfs.img \
+            --store "${STEAMOS_URL}/${STEAMOS_BUNDLE}.castr" \
+            --store "https://steamdeck-images.steamos.cloud/vr/chunks.castr" \
+            --expected-sha256 "$sha"
+          echo "Mounting and copying rootfs ..."
+          mkdir -p rootfs rootfs-ro
+          sudo mount -o loop,ro rootfs.img rootfs-ro
+          sudo rsync -aHAX --filter="-x btrfs.*" --numeric-ids rootfs-ro/ rootfs/
+          sudo umount rootfs-ro
+          # Free disk: remove intermediate files (~18 GB saved)
+          rm -rf bundle bundle.raucb rootfs.img rootfs-ro
+          echo "=== After rootfs extraction ==="
+          df -h /
+
+      - name: Build Mesa (all 4 slices)
+        run: |
+          sudo env \
+            PATH="$MESA_WORK/venv/bin:$PATH" \
+            MESA_WORK="$MESA_WORK" \
+            bash scripts/build-mesa.sh rootfs prepare aarch64 x86_64 i386 android
+          echo "=== After Mesa build ==="
+          df -h /
+
+      - name: Compress output
+        run: |
+          echo "Output slices:"
+          du -sh "$MESA_WORK/out/"*/
+          tar -cf mesa-sm8750.tar.zst --zstd -C "$MESA_WORK/out" .
+          ls -lh mesa-sm8750.tar.zst
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesa-sm8750
+          path: mesa-sm8750.tar.zst
+          retention-days: 30

@@ -1,0 +1,257 @@
+# Build the final flashable SteamOS Odin 3 (Snapdragon 8 Elite / SM8750) image.
+#
+# Depends on pre-built artifacts from build-kernel-sm8750.yml and build-mesa-sm8750.yml.
+# Run those first, then trigger this workflow.
+name: Build Odin 3 (8 Elite) Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_source:
+        description: >-
+          Kernel source: 'source' (custom SteamOS kernel with tracefs, verified) or 'prebuilt' (ROCKNIX 7.2.0 fallback)
+        required: false
+        default: 'source'
+        type: choice
+        options:
+          - source
+          - prebuilt
+      kernel_run_id:
+        description: >-
+          Kernel build run ID (only used if kernel_source is 'source'; leave blank for latest)
+        required: false
+      mesa_run_id:
+        description: >-
+          Mesa build run ID (leave blank for latest successful)
+        required: false
+
+jobs:
+  build-image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+
+    env:
+      STEAMOS_WORK: ${{ github.workspace }}/sm8750-work
+
+    steps:
+      - name: Free up disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
+            /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift \
+            /usr/local/share/boost /opt/az
+          sudo docker image prune -af 2>/dev/null || true
+          echo "=== After cleanup ==="
+          df -h /
+
+      - name: Configure kernel settings for bwrap
+        run: |
+          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            squashfs-tools dosfstools e2fsprogs fdisk uuid-runtime \
+            rsync curl python3 python3-requests python3-zstandard zstd \
+            gcc-aarch64-linux-gnu bubblewrap
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Load version manifest
+        run: |
+          if [ -f versions.env ]; then
+            sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+                -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                -e 's/"//g' -e "s/'//g" versions.env >> "$GITHUB_ENV"
+          else
+            echo "STEAMOS_BUILD=20261002.6232440" >> "$GITHUB_ENV"
+            echo "STEAMOS_BUNDLE=deckard-20261002.6232440-0.5.3" >> "$GITHUB_ENV"
+            echo "STEAM_ARM_CHANNEL=steamdeck_publicbeta" >> "$GITHUB_ENV"
+          fi
+
+      # ── Download custom kernel (only if source kernel requested) ─────
+      - name: Download kernel artifact
+        if: ${{ inputs.kernel_source == 'source' || inputs.kernel_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.kernel_run_id }}" ]; then
+            RUN_ID="${{ inputs.kernel_run_id }}"
+          else
+            RUN_ID=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow=build-kernel-sm8750.yml \
+              --status=success --limit=1 \
+              --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              RUN_ID=$(gh run list \
+                --repo "${{ github.repository }}" \
+                --workflow=build-kernel.yml \
+                --status=success --limit=1 \
+                --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            fi
+          fi
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No successful build-kernel-sm8750.yml (or build-kernel.yml) run found. Run the kernel workflow first."
+            exit 1
+          fi
+          echo "Downloading kernel from run $RUN_ID"
+          gh run download "$RUN_ID" \
+            --repo "${{ github.repository }}" \
+            -n kernel-sm8750 \
+            -D ./kernel-download/
+
+      - name: Stage custom kernel
+        if: ${{ inputs.kernel_source == 'source' || inputs.kernel_run_id != '' }}
+        run: |
+          # The kernel build (SM8750_KERNEL=source) produces output in a
+          # release-named directory (e.g. 7.2.0-sm8750-steamos). Create the
+          # structure that ensure_kernel() expects for the source path.
+          KWORK="${STEAMOS_WORK}/kernel-sm8750-src"
+          mkdir -p "$KWORK/output/tmp"
+          tar -xzf kernel-download/kernel-sm8750.tar.gz -C "$KWORK/output/tmp"
+          # Discover the exact kernel release name from the modules directory:
+          KREL="$(basename "$KWORK/output/tmp/modules/"*)"
+          echo "Kernel release detected: $KREL"
+          KREL_DIR="$KWORK/output/$KREL"
+          rm -rf "$KREL_DIR"
+          mv "$KWORK/output/tmp" "$KREL_DIR"
+          # Create the 'current' symlink that ensure_kernel looks for
+          ln -sfn "$KREL" "$KWORK/output/current"
+          echo "Kernel staged at $KREL_DIR"
+          ls -la "$KREL_DIR/boot/"
+          echo "Kernel config FTRACE check:"
+          grep -c 'CONFIG_FTRACE=y' "$KREL_DIR"/config-* || echo "No config file (prebuilt kernel)"
+
+      # ── Download pre-built Mesa stack ────────────────────────────────
+      - name: Download Mesa artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.mesa_run_id }}" ]; then
+            RUN_ID="${{ inputs.mesa_run_id }}"
+          else
+            RUN_ID=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow=build-mesa-sm8750.yml \
+              --status=success --limit=1 \
+              --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              RUN_ID=$(gh run list \
+                --repo "${{ github.repository }}" \
+                --workflow=build-mesa.yml \
+                --status=success --limit=1 \
+                --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            fi
+          fi
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No successful build-mesa-sm8750.yml (or build-mesa.yml) run found. Run the Mesa workflow first."
+            exit 1
+          fi
+
+          echo "Downloading Mesa from run $RUN_ID"
+          gh run download "$RUN_ID" \
+            --repo "${{ github.repository }}" \
+            -n mesa-sm8750 \
+            -D ./mesa-download/
+
+      - name: Stage Mesa stack
+        run: |
+          MESA_DIR="${STEAMOS_WORK}/mesa-stack"
+          mkdir -p "$MESA_DIR"
+          tar -xf mesa-download/mesa-sm8750.tar.zst --zstd -C "$MESA_DIR"
+          rm -rf ./mesa-download
+          echo "Mesa staged at $MESA_DIR"
+          ls -la "$MESA_DIR/"
+          echo "=== Disk after staging ==="
+          df -h /
+
+      # ── Restore Steam ARM seed from cache ────────────────────────────
+      - name: Restore Steam ARM seed from cache
+        id: cache-steam-seed
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.STEAMOS_WORK }}/steam-arm-seed
+          key: steam-seed-${{ env.STEAMOS_BUILD }}-${{ env.STEAM_ARM_CHANNEL || 'steamdeck_publicbeta' }}
+
+      - name: Check Steam ARM seed cache status
+        run: |
+          is_valid_seed=false
+          if [ -d "${{ env.STEAMOS_WORK }}/steam-arm-seed" ]; then
+            if [ -x ./scripts/install-complete-steam-client.sh ] && ./scripts/install-complete-steam-client.sh --check "${{ env.STEAMOS_WORK }}/steam-arm-seed" 2>/dev/null; then
+              is_valid_seed=true
+            elif [ -f "${{ env.STEAMOS_WORK }}/steam-arm-seed/steamrtarm64/steam" ] || [ -f "${{ env.STEAMOS_WORK }}/steam-arm-seed/.odin-complete-client" ]; then
+              is_valid_seed=true
+            fi
+          fi
+          if [ "$is_valid_seed" = "true" ]; then
+            echo "Steam seed restored from cache:"
+            ls -la "${{ env.STEAMOS_WORK }}/steam-arm-seed/"
+          else
+            echo "Cache miss for Steam seed. It will be bootstrapped headlessly from upstream rootfs during image build."
+            rm -rf "${{ env.STEAMOS_WORK }}/steam-arm-seed"
+          fi
+          echo "=== Disk after seed check ==="
+          df -h /
+
+      # ── Build the image ──────────────────────────────────────────────
+      - name: Build SteamOS Odin 3 image
+        run: |
+          if [ "${{ inputs.kernel_source }}" = "source" ] || [ -n "${{ inputs.kernel_run_id }}" ]; then
+            export SM8750_KERNEL=source
+            export SM8750_KERNEL_WORK="${STEAMOS_WORK}/kernel-sm8750-src"
+            echo "Using custom built kernel from source"
+          else
+            export SM8750_KERNEL=prebuilt
+            echo "Using official verified ROCKNIX prebuilt kernel"
+          fi
+          export MESA_STACK="${STEAMOS_WORK}/mesa-stack"
+          export STEAM_ARM_CHANNEL="${STEAM_ARM_CHANNEL:-steamdeck_publicbeta}"
+          ./make-steamos-sm8750.sh
+
+      # ── Save Steam ARM seed to cache (if newly generated) ────────────
+      - name: Check if Steam seed exists to cache
+        id: check-seed-exists
+        run: |
+          if [ -d "${{ env.STEAMOS_WORK }}/steam-arm-seed" ] && [ -n "$(ls -A "${{ env.STEAMOS_WORK }}/steam-arm-seed" 2>/dev/null)" ]; then
+            echo "has_seed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_seed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Steam ARM seed to cache
+        if: steps.cache-steam-seed.outputs.cache-hit != 'true' && steps.check-seed-exists.outputs.has_seed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.STEAMOS_WORK }}/steam-arm-seed
+          key: steam-seed-${{ env.STEAMOS_BUILD }}-${{ env.STEAM_ARM_CHANNEL || 'steamdeck_publicbeta' }}
+
+      - name: Check disk after build
+        if: always()
+        run: df -h /
+
+      # ── Compress and upload ──────────────────────────────────────────
+      - name: Compress image
+        run: |
+          IMG="${STEAMOS_WORK}/steamos-odin3.img"
+          echo "Compressing $IMG ..."
+          ls -lh "$IMG"
+          zstd -T0 -3 "$IMG" -o steamos-odin3.img.zst
+          ls -lh steamos-odin3.img.zst
+          sha256sum steamos-odin3.img.zst > steamos-odin3.img.zst.sha256
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: steamos-odin3-image
+          path: |
+            steamos-odin3.img.zst
+            steamos-odin3.img.zst.sha256
+          retention-days: 14
+          compression-level: 0  # already zstd compressed

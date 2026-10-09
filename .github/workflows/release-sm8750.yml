@@ -1,0 +1,174 @@
+# Promote and publish a tested SteamOS Odin 3 (Snapdragon 8 Elite / SM8750) image artifact to a GitHub Release.
+#
+# Decoupled from build-image-sm8750.yml so images can be downloaded, flashed to hardware,
+# and verified before being published to the public.
+#
+# Release tag convention: v*8elite* (e.g. v1.3-8elite-beta2)
+name: Release Odin 3 (8 Elite)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: >-
+          Release tag name (e.g. v1.3-8elite-beta2)
+        required: true
+        type: string
+      image_run_id:
+        description: >-
+          Run ID of the build-image-sm8750 workflow to release (leave blank for latest successful build)
+        required: false
+        type: string
+      release_title:
+        description: >-
+          Release title (leave blank to default to tag name)
+        required: false
+        type: string
+      prerelease:
+        description: >-
+          Mark as pre-release
+        type: boolean
+        default: true
+      draft:
+        description: >-
+          Save as draft
+        type: boolean
+        default: false
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Validate tag format
+        run: |
+          TAG="${{ inputs.tag_name }}"
+          echo "Release tag: $TAG"
+          if [[ ! "$TAG" =~ 8elite ]]; then
+            echo "::warning::Tag '$TAG' does not contain '8elite'. The standard Odin 3 convention is 'v*8elite*' (e.g. v1.3-8elite-beta2)."
+          fi
+
+      - name: Free disk space and install tools
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache
+          sudo apt-get update && sudo apt-get install -y zstd p7zip-full
+
+      - name: Determine image run ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.image_run_id }}" ]; then
+            RUN_ID="${{ inputs.image_run_id }}"
+            echo "Using specified image run ID: $RUN_ID"
+          else
+            echo "Finding latest successful build-image-sm8750.yml run..."
+            RUN_ID=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow=build-image-sm8750.yml \
+              --status=success --limit=1 \
+              --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              RUN_ID=$(gh run list \
+                --repo "${{ github.repository }}" \
+                --workflow=build-image.yml \
+                --status=success --limit=1 \
+                --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+            fi
+            echo "Latest successful image run ID: $RUN_ID"
+          fi
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No successful build-image-sm8750.yml (or build-image.yml) run found. Run build-image-sm8750.yml first."
+            exit 1
+          fi
+
+
+          echo "IMAGE_RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+
+      - name: Download image artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Downloading artifact from run $IMAGE_RUN_ID..."
+          mkdir -p ./download
+          gh run download "$IMAGE_RUN_ID" \
+            --repo "${{ github.repository }}" \
+            -n steamos-odin3-image \
+            -D ./download/
+          ls -la ./download/
+
+      - name: Prepare release assets
+        run: |
+          TAG="${{ inputs.tag_name }}"
+          if [ ! -f ./download/steamos-odin3.img.zst ]; then
+            echo "::error::Artifact steamos-odin3.img.zst not found in run $IMAGE_RUN_ID!"
+            exit 1
+          fi
+
+          echo "Decompressing sparse image from zstd..."
+          zstd -d --sparse ./download/steamos-odin3.img.zst -o ./steamos-odin3.img
+          rm -rf ./download
+
+          echo "Packaging into multi-volume 7z archive (< 2 GiB per volume)..."
+          ARCHIVE_BASE="steamos-arm-handhelds-sm8750-${TAG}.7z"
+          7z a -mx1 -v1900m "${ARCHIVE_BASE}" ./steamos-odin3.img
+          rm -f ./steamos-odin3.img
+
+          sha256sum ${ARCHIVE_BASE}.* > SHA256SUMS
+
+          echo "### Release Assets Prepared" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Source Run:** [\`${IMAGE_RUN_ID}\`](https://github.com/${{ github.repository }}/actions/runs/${IMAGE_RUN_ID})" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            steamos-arm-handhelds-sm8750-*.7z*
+            SHA256SUMS
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag_name }}"
+          TITLE="${{ inputs.release_title }}"
+          [ -z "$TITLE" ] && TITLE="$TAG"
+
+          FLAGS=()
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            FLAGS+=(--prerelease)
+          fi
+          if [ "${{ inputs.draft }}" = "true" ]; then
+            FLAGS+=(--draft)
+          fi
+
+          ASSETS=(steamos-arm-handhelds-sm8750-${TAG}.7z.* SHA256SUMS)
+          echo "Publishing release '$TAG' ($TITLE) with assets: ${ASSETS[*]}..."
+
+          # Upload to existing release if present, otherwise create new release
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG exists. Uploading assets..."
+            gh release upload "$TAG" "${ASSETS[@]}" \
+              --repo "${{ github.repository }}" \
+              --clobber
+          else
+            echo "Creating new release $TAG..."
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --repo "${{ github.repository }}" \
+              --title "$TITLE" \
+              --generate-notes \
+              "${FLAGS[@]}"
+          fi
+
+          RELEASE_URL=$(gh release view "$TAG" --repo "${{ github.repository }}" --json url -q .url)
+          echo "### Published!" >> "$GITHUB_STEP_SUMMARY"
+          echo "View release: [${TAG}](${RELEASE_URL})" >> "$GITHUB_STEP_SUMMARY"

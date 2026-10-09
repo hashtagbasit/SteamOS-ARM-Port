@@ -99,3 +99,7 @@ _agent_*
 # Allow overlay usr/bin scripts to be tracked despite user global gitignore
 !*overlay/usr/bin/
 !*overlay/usr/bin/**
+
+# Local AI agent context files
+/AGENTS.md
+

@@ -1,0 +1,83 @@
+# Build the SM8750 / Snapdragon 8 Elite kernel from source with tracefs enabled.
+#
+# Produces: kernel-sm8750.tar.gz containing boot/KERNEL, modules/, firmware/,
+#           dtbs/, config, System.map.
+#
+# Requires native aarch64 — the kernel build.sh enforces uname -m == aarch64.
+# The ROCKNIX/distribution checkout is sparse-cloned to save bandwidth.
+name: Build SM8750 (8 Elite) Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: fedora:43
+
+    env:
+      WORK: ${{ github.workspace }}/kernel-work
+      ROCKNIX_DIR: ${{ github.workspace }}/rocknix-20260901
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gcc-c++ make bc bison flex python3 curl tar xz gzip cpio \
+            kmod patch perl rsync openssl-devel elfutils-libelf-devel \
+            busybox file diffutils git findutils dwarves zstd
+          git config --global --add safe.directory '*'
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check initial disk space
+        run: df -h /
+
+      # The build needs a git checkout of ROCKNIX/distribution at the
+      # pinned tag. The repo is huge so we sparse-checkout only the paths
+      # that build.sh + soc.env actually reference.
+      - name: Sparse-clone ROCKNIX distribution
+        run: |
+          ROCKNIX_REF=$(grep '^ROCKNIX_REF=' external-and-mods/kernel-sm8750/soc.env | cut -d= -f2)
+          echo "Pinned ROCKNIX ref: $ROCKNIX_REF"
+          git clone --depth 1 --branch "$ROCKNIX_REF" --sparse \
+            https://github.com/ROCKNIX/distribution.git "$ROCKNIX_DIR"
+          cd "$ROCKNIX_DIR"
+          git sparse-checkout set \
+            projects/ROCKNIX/packages/linux/patches \
+            projects/ROCKNIX/devices/SM8750
+
+      - name: Cache downloaded sources
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WORK }}/cache
+          key: kernel-cache-sm8750-${{ hashFiles('external-and-mods/kernel-sm8750/soc.env') }}
+          restore-keys: kernel-cache-sm8750-
+
+      - name: Build kernel
+        run: bash external-and-mods/kernel-sm8750/build.sh
+
+      - name: Print kernel release and compiler info
+        run: |
+          KREL=$(basename "$(readlink -f "$WORK/output/current")")
+          echo "### Kernel: $KREL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Kernel release: $KREL"
+          echo "Compiler banner: $(gcc --version | head -n1)"
+          echo "Linker banner: $(ld --version | head -n1)"
+          echo "CONFIG_RELR: $(grep 'CONFIG_RELR' "$WORK/output/current/config-"* || echo 'not found')"
+
+      - name: Package kernel output
+        run: tar -czf kernel-sm8750.tar.gz -C "$WORK/output/current" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-sm8750
+          path: kernel-sm8750.tar.gz
+          retention-days: 30
+
+      - name: Final disk space
+        if: always()
+        run: df -h /

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the AYN Odin 2 family gyro userspace from source inside the rootfs
+# Build the AYN Odin 2 family / Thor gyro userspace from source inside the rootfs
 # and install it to <rootfs>/usr/lib/qcom-gyro/{bin,lib}:
 #   qrtr (qrtr-lookup, libqrtr)         BSD-3-Clause
 #   libqrtr-glib, libqmi (libraries)    LGPL-2.1+
 #   libssc (+ our patches)              GPL-3.0+
-#   hexagonrpc (+ our patches)          GPL-3.0+
+#   hexagonrpc (+ our patches, with sscregistrygen) GPL-3.0+
 #   qcom-motion, qcom-sdl-pad           GPL-3.0+ AND Apache-2.0
 # Build only: protoc-gen-c from protobuf-c 1.5.0, as SteamOS's protobuf-c
 # package ships one linked against an abseil the rootfs no longer has.
@@ -80,6 +80,8 @@ m libqmi -Dmbim_qmux=false -Dqrtr=true -Dudev=false -Dintrospection=false \
   -Dmm_runtime_check=false -Drmnet=false
 m libssc -Dtests=false -Dintrospection=false -Dauto_features=disabled
 m hexagonrpc -Dhexagonrpcd_verbose=false
+# Thor registry generator, built when json-c is found but not installed.
+install -m0755 build/hexagonrpc/tools/sscregistrygen $P/bin/
 CF="-O2 -std=c11 -Wall -Wextra -Werror"
 gcc $CF src/qcom-motion/batocera-qcom-motion.c -o $P/bin/qcom-motion \
   $(pkg-config --cflags --libs libssc gio-2.0 zlib) -lm
@@ -92,7 +94,7 @@ G="$R/usr/lib/qcom-gyro"
 log "install into $G"
 rm -rf "$G/bin" "$G/lib"
 install -d -m0755 "$G/bin" "$G/lib"
-install -m0755 "$P"/bin/{hexagonrpcd,qrtr-lookup,qcom-motion,qcom-sdl-pad} "$G/bin/"
+install -m0755 "$P"/bin/{hexagonrpcd,sscregistrygen,qrtr-lookup,qcom-motion,qcom-sdl-pad} "$G/bin/"
 for l in libqrtr libqrtr-glib libqmi-glib libssc libhexagonrpc; do
   cp -P "$P"/lib/"$l".so.* "$G/lib/"
 done

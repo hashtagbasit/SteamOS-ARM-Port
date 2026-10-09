@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install the AYN Odin 2 family gyro stack into a SteamOS rootfs:
+# Install the AYN Odin 2 family / Thor gyro stack into a SteamOS rootfs:
 # hexagonrpcd (ADSP sensor hub listeners), qcom-motion (SSC -> DSU :26760)
 # and qcom-sdl-pad (motion-only DualSense that InputPlumber merges into the pad).
 # Everything goes under /usr/lib/qcom-gyro; the units skip devices that
-# aren't an Odin 2 / Mini / Portal. Needs the gyro kernel (fastrpc SensorsPD).
+# aren't an Odin 2 / Mini / Portal / Thor. Needs the gyro kernel (fastrpc SensorsPD).
 # The binaries are built from source by build-qcom-gyro-in-rootfs.sh (run here
 # when the rootfs doesn't have them yet).
 set -euo pipefail

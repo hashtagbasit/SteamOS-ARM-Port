@@ -817,6 +817,7 @@ rm -f "$R/usr/lib/tmpfiles.d/sm8550-cpuidle-teo.conf" \
       "$R/usr/lib/udev/rules.d/99-zz-sm8550-backlight-untag.rules"
 for f in usr/lib/systemd/zram-generator.conf.d/60-steamos-arm-zram.conf \
          usr/lib/tmpfiles.d/steamos-arm-cpuidle-teo.conf \
+         usr/lib/sysctl.d/60-steamos-arm-net-rmem.conf \
          usr/lib/udev/rules.d/99-zz-steamos-arm-backlight-untag.rules; do
   install_file "$OVL/$f" "$R/$f" 0644
 done

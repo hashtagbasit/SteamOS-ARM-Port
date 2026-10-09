@@ -65,7 +65,7 @@ Details: `vendor/masi-motion/README.md`
 - In DT, **`qcom,pd-type` is Thor-only**. Forcing it in common prevented SSC from publishing on Odin 2.
 - Install Image + modules from the **same** build (full `./update.sh`). Image-only `make Image` can black-screen.
 
-## SteamOS, 7.2.8 kernel (Odin 2 / Portal)
+## SteamOS, 7.2.8 kernel (Odin 2 / Portal / Thor)
 
 Kernel (`external-and-mods/kernel-sm8550`):
 
@@ -73,10 +73,14 @@ Kernel (`external-and-mods/kernel-sm8550`):
   heap + SensorsPD routing for the ADSP sensors, rebased onto 7.2.8. The
   SensorsPD part only runs with `qcom,fastrpc-adsp-sensors-pdr` in the DT.
 - `dts/qcs8550-ayn-odin2-gyro.dtsi`, included from the Odin 2 / Mini / Portal
-  dts appends only (the Thor is left alone): `adsp_rpc_remote_heap_mem` and the
+  dts appends (not the shared common dtsi): `adsp_rpc_remote_heap_mem` and the
   `qcom,fastrpc-adsp-sensors-pdr` / `qcom,vmids` fastrpc properties. Without
   them dmesg says `no reserved DMA memory for FASTRPC` and the SSC service
   (QRTR 400) never shows up.
+- `dts/qcs8550-ayn-thor-gyro.dtsi`, included from the Thor dts append: the
+  same Odin 2 gyro dtsi plus `qcom,pd-type` on ADSP context banks 3–7 (root,
+  audio, sensors with 8 sessions, user, user). The Thor already boots its
+  stock ADSP (`qcom/sm8550/ayn/thor/adsp.mbn`, which has the SH5001 driver).
 - Builds on an x86_64 host too: `build-gcc15.sh` cross compiles in podman/docker
   (`DOCKER=podman`), e.g.
   `SM8550_RECIPE=7.2 MOUNT=… FRAME_FW_DIR=… BUSYBOX=… DOCKER=podman bash external-and-mods/kernel-common/build-gcc15.sh sm8550`.
@@ -84,15 +88,21 @@ Kernel (`external-and-mods/kernel-sm8550`):
 Userspace (`vendor/qcom-gyro/steamos`, installed by
 `scripts/install-qcom-gyro-sm8550.sh` into `/usr/lib/qcom-gyro`, state such as
 the persist registry copy and calibration in `/var/lib/qcom-gyro`). The units
-only run on `ayn,odin2`, `ayn,odin2mini` and `ayn,odin2portal` (`supported`).
-The binaries (hexagonrpcd, qrtr-lookup, qcom-motion, qcom-sdl-pad and their
-libs) are built from source inside the rootfs by
-`scripts/build-qcom-gyro-in-rootfs.sh`; upstreams, commits and licenses are in
+only run on `ayn,odin2`, `ayn,odin2mini`, `ayn,odin2portal` and `ayn,thor`
+(`supported`). The binaries (hexagonrpcd, sscregistrygen, qrtr-lookup,
+qcom-motion, qcom-sdl-pad and their libs) are built from source inside the
+rootfs by `scripts/build-qcom-gyro-in-rootfs.sh`; upstreams, commits and licenses are in
 `vendor/qcom-gyro/SOURCES.md`.
 
-- `qcom-sensors.service` → `qcom-sensors-start.sh`: copies the persist
-  registry and starts the hexagonrpcd SensorsPD + RootPD listeners.
-- `qcom-motion.service`: qcom-motion, DSU on :26760. The Portal has
+- `qcom-sensors.service` → `qcom-sensors-start.sh`: sets up the sensor
+  registry in `/var/lib/qcom-gyro/state/registry` (only when it isn't there
+  yet, it keeps the unit's learned calibration) and starts the hexagonrpcd
+  SensorsPD + RootPD listeners. Odin 2 family: copied from the Android
+  persist partition (read-only). Thor: there is none on persist, so
+  `sscregistrygen -p HDK -s <soc_id>` generates the SH5001 one from
+  `share-qcom/sm8550/AYN/thor/sensors/config`.
+- `qcom-motion.service`: qcom-motion, DSU on :26760 (`--profile auto` picks
+  `thor`, `portal` or `odin2` from the DT compatible). The Portal has
   its own `portal` profile: its IMU sits turned compared to the Odin 2
   (top, left and out of the screen are +X, +Y, +Z), and with the Odin 2 map
   tilting up/down moved the cursor sideways.
@@ -101,7 +111,8 @@ libs) are built from source inside the rootfs by
   its calibration report declares (20 per deg/s, 10000 per G); it used to send
   1024 per deg/s, which Steam read about 51x too fast. The SM8550 InputPlumber
   composite takes it as a hidraw source, so gyro reaches targets that have one
-  (deck-uhid, ds5-edge). InputPlumber skips virtual devices, so this needs
+  (deck-uhid, ds5-edge); the Thor's composite (`02-ayn-odin.yaml`) takes it
+  the same way. InputPlumber skips virtual devices, so this needs
   `external-and-mods/InputPlumber/0003-manage-ayn-odin2-imu-uhid.patch`
   (tested on a Portal: the IMU hidraw joined the composite and got hidden).
 - Back paddles (Portal M1/M2) already work through `gpio-keys-paddles` with
@@ -110,6 +121,7 @@ libs) are built from source inside the rootfs by
 Status (Portal): gyro works in Steam Input (deck-uhid target) with this
 kernel, the stock ADSP firmware and these units (checked: SSC on QRTR 400,
 DSU on :26760, right directions and speed in Steam, audio fine).
+Thor: not tested on hardware yet.
 
 The listeners have to attach soon after "msm/adsp/sensor_pd is up". Started
 by hand a minute or more after boot, SensorsPD still reads the registry and

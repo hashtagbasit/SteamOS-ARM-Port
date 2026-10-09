@@ -1,5 +1,5 @@
 [Unit]
-Description=Qualcomm ADSP sensor hub (gyro / accel) for the AYN Odin 2 family
+Description=Qualcomm ADSP sensor hub (gyro / accel) for the AYN Odin 2 family and Thor
 ConditionPathExists=/dev/fastrpc-adsp
 After=sound.target
 

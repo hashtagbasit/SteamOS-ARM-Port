@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  * Gyro for the AYN Odin 2 / Mini / Portal (included from their dts appends,
- * not from qcs8550-ayn-common.dtsi, so the Thor stays as it was).
+ * not from qcs8550-ayn-common.dtsi). The Thor includes it from
+ * qcs8550-ayn-thor-gyro.dtsi and adds its pd-type banks there.
  *
  * The IMU hangs off the ADSP's Sensor Core. hexagonrpcd starts the sensors
  * PD, which needs a remote heap handed to the ADSP and PDR for the sensors

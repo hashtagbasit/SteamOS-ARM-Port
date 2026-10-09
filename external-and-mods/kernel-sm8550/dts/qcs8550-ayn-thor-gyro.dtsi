@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Gyro for the AYN Thor (included from qcs8550-ayn-thor.dts.append).
+ *
+ * Same remote heap + SensorsPD routing as the Odin 2 family, plus a
+ * qcom,pd-type on each ADSP FastRPC context bank: the Thor's stock ADSP
+ * (SH5001 driver) only publishes the sensors service with them. The Odin 2
+ * does the opposite, so this stays out of qcs8550-ayn-odin2-gyro.dtsi.
+ */
+#include "qcs8550-ayn-odin2-gyro.dtsi"
+
+&remoteproc_adsp {
+	glink-edge {
+		fastrpc {
+			compute-cb@3 {
+				qcom,pd-type = <1>;	/* root */
+			};
+
+			compute-cb@4 {
+				qcom,pd-type = <2>;	/* audio */
+			};
+
+			compute-cb@5 {
+				qcom,nsessions = <8>;
+				qcom,pd-type = <3>;	/* sensors */
+			};
+
+			compute-cb@6 {
+				qcom,pd-type = <7>;	/* user */
+			};
+
+			compute-cb@7 {
+				qcom,pd-type = <7>;	/* user */
+			};
+		};
+	};
+};

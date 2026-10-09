@@ -3,6 +3,7 @@
  * SteamOS ARM additions for the AYN Thor (appended to ROCKNIX's
  * qcs8550-ayn-thor.dts by kernel-common/build.sh).
  */
+#include "qcs8550-ayn-thor-gyro.dtsi"
 
 /*
  * Lid (hall) sensor: the sensor output is open-drain and ROCKNIX sets no

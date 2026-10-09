@@ -32,6 +32,20 @@ source_devices:
       phys_path: gpio-keys-ayn/input0
       handler: event*
     capability_map_id: ayn_mcu
+  # Gyro / accel (with the gyro kernel): qcom-imu-pad.service runs
+  # qcom-sdl-pad --motion-only, a DualSense over uhid named "AYN Odin2 IMU"
+  # (same name on the Thor) with idle buttons and sticks, so only its motion
+  # is used. Absent without the service.
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x054c
+      product_id: 0x0ce6
+      name: "AYN Odin2 IMU*"
+  - group: gamepad
+    blocked: true
+    evdev:
+      name: "AYN Odin2 IMU*"
+      handler: event*
 
 options:
   auto_manage: true

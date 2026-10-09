@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: justjoseorg <justjoseorg@users.noreply.github.com>
+Date: Thu, 9 Oct 2026 10:50:00 -0600
+Subject: [PATCH] media: iris: resume in driver when resolution is unchanged
+
+The gen2 firmware sends a settings-change (source change) on the first
+keyframe after every streamon. Clients like Steam Remote Play set up
+the capture queue up front and treat the resulting ERROR|LAST capture
+buffer as a decode failure: they stream off/on and feed the same
+keyframe again, which loops forever and the stream stays green.
+
+If the capture format and buffer requirements did not change, resume
+the firmware in the driver instead of signalling a resolution change,
+and requeue the empty capture buffers it returned while paused.
+Real resolution changes still go through the normal V4L2 flow.
+---
+--- a/drivers/media/platform/qcom/iris/iris_buffer.h
++++ b/drivers/media/platform/qcom/iris/iris_buffer.h
+@@ -55,6 +55,7 @@
+  * BUF_ATTR_QUEUED: buffers submitted to firmware.
+  * BUF_ATTR_DEQUEUED: buffers received from firmware.
+  * BUF_ATTR_BUFFER_DONE: buffers sent back to vb2.
++ * BUF_ATTR_RECYCLE: empty capture buffer held back to be requeued to firmware.
+  */
+ enum iris_buffer_attributes {
+ 	BUF_ATTR_DEFERRED		= BIT(0),
+@@ -62,6 +63,7 @@
+ 	BUF_ATTR_QUEUED			= BIT(2),
+ 	BUF_ATTR_DEQUEUED		= BIT(3),
+ 	BUF_ATTR_BUFFER_DONE		= BIT(4),
++	BUF_ATTR_RECYCLE		= BIT(5),
+ };
+ 
+ /**
+--- a/drivers/media/platform/qcom/iris/iris_common.c
++++ b/drivers/media/platform/qcom/iris/iris_common.c
+@@ -215,6 +215,8 @@
+ 		return -EINVAL;
+ 	}
+ 
++	inst->drc_auto_resume = false;
++
+ 	ret = hfi_ops->session_stop(inst, plane);
+ 	if (ret)
+ 		goto error;
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -381,6 +381,13 @@
+ 	if (!(buf->attr & BUF_ATTR_QUEUED))
+ 		return -EINVAL;
+ 
++	if (inst->drc_auto_resume && !hfi_buffer->data_size &&
++	    !(hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST)) {
++		buf->attr &= ~BUF_ATTR_QUEUED;
++		buf->attr |= BUF_ATTR_RECYCLE;
++		return 0;
++	}
++
+ 	buf->data_offset = hfi_buffer->data_offset;
+ 	buf->data_size = hfi_buffer->data_size;
+ 	buf->timestamp = hfi_buffer->timestamp;
+@@ -665,6 +672,8 @@
+ static int iris_hfi_gen2_handle_src_change(struct iris_inst *inst,
+ 					   struct iris_hfi_packet *pkt)
+ {
++	struct v4l2_pix_format_mplane old_fmt, *new_fmt;
++	struct vb2_queue *dst_q;
+ 	int ret;
+ 
+ 	if (pkt->port != HFI_PORT_BITSTREAM)
+@@ -674,12 +683,73 @@
+ 	if (ret)
+ 		return ret;
+ 
++	old_fmt = inst->fmt_dst->fmt.pix_mp;
+ 	iris_hfi_gen2_read_input_subcr_params(inst);
++
++	/*
++	 * Clients that set up the capture queue before feeding the bitstream
++	 * (e.g. Steam Remote Play) get a resolution change on every keyframe
++	 * after a restart. If nothing about the capture side changed, resume
++	 * in the driver like V4L2_DEC_CMD_START instead of signalling userspace.
++	 */
++	new_fmt = &inst->fmt_dst->fmt.pix_mp;
++	dst_q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
++	if (inst->state == IRIS_INST_STREAMING &&
++	    inst->sub_state & IRIS_INST_SUB_DRC &&
++	    new_fmt->pixelformat == old_fmt.pixelformat &&
++	    new_fmt->width == old_fmt.width &&
++	    new_fmt->height == old_fmt.height &&
++	    new_fmt->plane_fmt[0].sizeimage <= old_fmt.plane_fmt[0].sizeimage &&
++	    inst->buffers[BUF_OUTPUT].min_count <= vb2_get_num_buffers(dst_q)) {
++		inst->drc_auto_resume = true;
++		return 0;
++	}
++
+ 	iris_vdec_src_change(inst);
+ 
+ 	return 0;
+ }
+ 
++static void iris_hfi_gen2_drc_auto_resume(struct iris_inst *inst)
++{
++	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
++	enum iris_inst_sub_state clear_sub_state;
++	struct v4l2_m2m_buffer *m2m_buffer, *n;
++	struct iris_buffer *buf;
++
++	inst->drc_auto_resume = false;
++	clear_sub_state = IRIS_INST_SUB_DRC | IRIS_INST_SUB_DRC_LAST;
++
++	if (inst->sub_state & IRIS_INST_SUB_INPUT_PAUSE) {
++		if (hfi_ops->session_resume_drc(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE))
++			goto error;
++		clear_sub_state |= IRIS_INST_SUB_INPUT_PAUSE;
++	}
++	if (inst->sub_state & IRIS_INST_SUB_OUTPUT_PAUSE) {
++		if (hfi_ops->session_resume_drc(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE))
++			goto error;
++		clear_sub_state |= IRIS_INST_SUB_OUTPUT_PAUSE;
++	}
++
++	if (iris_inst_change_sub_state(inst, clear_sub_state, 0))
++		goto error;
++
++	v4l2_m2m_for_each_dst_buf_safe(inst->m2m_ctx, m2m_buffer, n) {
++		buf = to_iris_buffer(&m2m_buffer->vb);
++		if (!(buf->attr & BUF_ATTR_RECYCLE))
++			continue;
++		buf->attr &= ~BUF_ATTR_RECYCLE;
++		if (iris_queue_buffer(inst, buf))
++			goto error;
++	}
++
++	dev_dbg(inst->core->dev, "resolution unchanged, resumed decode in driver\n");
++	return;
++
++error:
++	iris_inst_change_state(inst, IRIS_INST_ERROR);
++}
++
+ static int iris_hfi_gen2_handle_session_command(struct iris_inst *inst,
+ 						struct iris_hfi_packet *pkt)
+ {
+@@ -963,6 +1033,9 @@
+ 		}
+ 	}
+ 
++	if (inst->drc_auto_resume && iris_drc_pending(inst))
++		iris_hfi_gen2_drc_auto_resume(inst);
++
+ 	if (dequeue)
+ 		iris_hfi_gen2_handle_dequeue_buffers(inst);
+ 
+--- a/drivers/media/platform/qcom/iris/iris_instance.h
++++ b/drivers/media/platform/qcom/iris/iris_instance.h
+@@ -67,6 +67,7 @@
+  * @metadata_idx: index for metadata buffer
+  * @codec: codec type
+  * @last_buffer_dequeued: a flag to indicate that last buffer is sent by driver
++ * @drc_auto_resume: resolution change with unchanged capture format, resume in driver
+  * @last_buf_ns: start time of received input buffer for current one second FPS window
+  * @frame_counter: input buffer counter for current one second FPS window
+  * @frame_rate: frame rate of current instance
+@@ -114,6 +115,7 @@
+ 	u32				metadata_idx;
+ 	u32				codec;
+ 	bool				last_buffer_dequeued;
++	bool				drc_auto_resume;
+ 	u64				last_buf_ns;
+ 	u32				frame_counter;
+ 	u32				frame_rate;
+--- a/drivers/media/platform/qcom/iris/iris_vdec.c
++++ b/drivers/media/platform/qcom/iris/iris_vdec.c
+@@ -436,6 +436,8 @@
+ 	if (ret)
+ 		return ret;
+ 
++	buf->attr &= ~BUF_ATTR_RECYCLE;
++
+ 	if (buf->type == BUF_INPUT)
+ 		iris_set_ts_metadata(inst, vbuf);
+ 

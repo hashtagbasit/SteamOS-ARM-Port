@@ -283,10 +283,11 @@ else
   echo "seat:x:974:steamos" >> "$R/etc/group"
 fi
 
-# Passwordless sudo for steamos user
+# Passwordless sudo for steamos user (zz- prefix ensures evaluation after wheel)
 mkdir -p "$R/etc/sudoers.d"
-echo 'steamos ALL=(ALL) NOPASSWD: ALL' > "$R/etc/sudoers.d/99-steamos-nopasswd"
-chmod 0440 "$R/etc/sudoers.d/99-steamos-nopasswd"
+rm -f "$R/etc/sudoers.d/99-steamos-nopasswd"
+echo 'steamos ALL=(ALL) NOPASSWD: ALL' > "$R/etc/sudoers.d/zz-steamos-nopasswd"
+chmod 0440 "$R/etc/sudoers.d/zz-steamos-nopasswd"
 
 # Low-latency SSH (disable reverse DNS lookup timeout) and enable sshd
 mkdir -p "$R/etc/ssh/sshd_config.d"

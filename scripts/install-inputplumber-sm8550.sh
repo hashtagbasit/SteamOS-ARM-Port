@@ -80,10 +80,25 @@ install_tarball() {
   fi
 }
 
+is_aarch64() {
+  local f="$1"
+  [[ -e "$f" ]] || return 1
+  if command -v file >/dev/null; then
+    file -L "$f" | grep -q "ARM aarch64"
+  else
+    python3 -c 'import sys, pathlib; p=pathlib.Path(sys.argv[1]); data=p.resolve().read_bytes(); sys.exit(0 if len(data)>=20 and data[:4]==b"\x7fELF" and data[18]==0xb7 else 1)' "$f"
+  fi
+}
+
 install_libiio() {
   if [[ -e "${R}/usr/lib/libiio.so.0" || -e "${R}/usr/lib/libiio.so" ]]; then
-    log "libiio already in rootfs"
-    return 0
+    if is_aarch64 "${R}/usr/lib/libiio.so.0" || is_aarch64 "${R}/usr/lib/libiio.so"; then
+      log "libiio already in rootfs"
+      return 0
+    else
+      log "libiio in rootfs is not aarch64; removing invalid library"
+      rm -f "${R}/usr/lib/libiio"* "${R}/usr/lib64/libiio"*
+    fi
   fi
   # Minimal local-backend libiio — InputPlumber links it even without IMU.
   local src="${CACHE}/libiio-src"
@@ -212,12 +227,23 @@ libdirs = [root / "usr/lib", root / "usr/lib64", root / "lib"]
 for soname in needed:
     if soname in {"linux-vdso.so.1", "ld-linux-aarch64.so.1"}:
         continue
-    if any((d / soname).exists() for d in libdirs):
-        continue
-    missing.append(soname)
+    matched = False
+    for d in libdirs:
+        candidate = d / soname
+        if candidate.exists():
+            try:
+                cdata = candidate.resolve().read_bytes()
+                if cdata[:4] == b"\x7fELF" and cdata[18:20] == data[18:20]:
+                    matched = True
+                    break
+            except Exception:
+                matched = True
+                break
+    if not matched:
+        missing.append(soname)
 print("NEEDED:", ", ".join(needed) or "(unknown)")
 if missing:
-    raise SystemExit("missing libraries in rootfs: " + ", ".join(missing))
+    raise SystemExit("missing or architecture mismatch libraries in rootfs: " + ", ".join(missing))
 print("all NEEDED libs present in rootfs")
 PY
 }

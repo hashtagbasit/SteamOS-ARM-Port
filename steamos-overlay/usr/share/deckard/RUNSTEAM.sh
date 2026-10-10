@@ -47,13 +47,23 @@ done
 # Force-off leaves .crash; Steam then opens -child-update-ui (the wheel)
 # and logs "Looks like steam didn't shutdown cleanly".
 rm -f "${STEAMROOT}/.crash" "${STEAMROOT}/steam.pid" 2>/dev/null || true
-printf '%s\n' \
-  'BootStrapperInhibitAll=enable' \
-  'BootStrapperForceSelfUpdate=disable' \
-  'BootStrapperInhibitClientChecksum=enable' \
-  'BootStrapperInhibitBootstrapperChecksum=enable' \
-  'BootStrapperInhibitUpdateOnLaunch=enable' \
-  >"${STEAMROOT}/steam.cfg" 2>/dev/null || true
+# Client self-updates are blocked by default (x86 CDN builds break the handheld).
+# Opt in with `touch ${STEAMROOT}/.allow-client-updates` (or
+# STEAM_ALLOW_CLIENT_UPDATES=1) to follow the selected client beta channel,
+# e.g. the arm64 build shared with the Steam Frame.
+ALLOW_CLIENT_UPDATES=0
+if [[ -e "${STEAMROOT}/.allow-client-updates" || "${STEAM_ALLOW_CLIENT_UPDATES:-0}" == "1" ]]; then
+  ALLOW_CLIENT_UPDATES=1
+  rm -f "${STEAMROOT}/steam.cfg" "${STEAMROOT}/${STEAM_RT_ARM64}/steam.cfg" 2>/dev/null || true
+else
+  printf '%s\n' \
+    'BootStrapperInhibitAll=enable' \
+    'BootStrapperForceSelfUpdate=disable' \
+    'BootStrapperInhibitClientChecksum=enable' \
+    'BootStrapperInhibitBootstrapperChecksum=enable' \
+    'BootStrapperInhibitUpdateOnLaunch=enable' \
+    >"${STEAMROOT}/steam.cfg" 2>/dev/null || true
+fi
 # Version 0 / "no bootstrapper found" keeps Gamepad UI on the update spinner.
 if [[ ! -s "${STEAMROOT}/steam.inf" ]]; then
   ver=1788652215
@@ -178,6 +188,34 @@ if [[ -d "${STEAMROOT}/linuxarm64" && -d "${STEAMROOT}/steamrtarm64" ]]; then
   done
   unset _lib _src _dst
 fi
+# PyroWave decoding for Remote Play: the arm64 streaming_client has no PyroWave decoder, the
+# x86 one in steamrt64 (client beta) does. Opt in with `touch ${STEAMROOT}/.pyrowave-box64`
+# to run the x86 client under box64. Applied on every launch because client updates replace
+# streaming_client; the real arm64 binary is kept as streaming_client.arm64.
+# libSDL3_ttf must be emulated too: box64's native wrapper calls the x86 SDL3 IO callbacks
+# directly and dies with SIGILL when the client draws text (e.g. the on-screen keyboard).
+_sc="${STEAMROOT}/${STEAM_RT_ARM64}/streaming_client"
+_sc_x86="${STEAMROOT}/steamrt64/streaming_client"
+_sc_is_elf() { [[ "$(head -c 4 "$1" 2>/dev/null | tail -c 3)" == ELF ]]; }
+if [[ -e "${STEAMROOT}/.pyrowave-box64" && -x "${_sc_x86}" ]] && command -v box64 >/dev/null; then
+  if [[ -f "${_sc}" ]] && _sc_is_elf "${_sc}"; then
+    mv -f "${_sc}" "${_sc}.arm64" 2>/dev/null || true
+  fi
+  if ! grep -q PYROWAVE_BOX64_WRAPPER "${_sc}" 2>/dev/null; then
+    cat >"${_sc}" <<EOF || true
+#!/bin/sh
+# PYROWAVE_BOX64_WRAPPER (written by RUNSTEAM.sh; remove ${STEAMROOT}/.pyrowave-box64 to undo)
+S='${STEAMROOT}'
+exec env BOX64_EMULATED_LIBS=libSDL3_ttf.so.0 \\
+  BOX64_LD_LIBRARY_PATH="\$S/steamrt64:\$S/ubuntu12_64:\$S/linux64" \\
+  box64 "\$S/steamrt64/streaming_client" "\$@" >"\$S/logs/streaming_client_box64.log" 2>&1
+EOF
+    chmod 0755 "${_sc}" 2>/dev/null || true
+  fi
+elif [[ -f "${_sc}.arm64" ]] && ! _sc_is_elf "${_sc}"; then
+  mv -f "${_sc}.arm64" "${_sc}" 2>/dev/null || true
+fi
+unset _sc _sc_x86
 echo "RUNSTEAM: DISPLAY=${DISPLAY} GAMESCOPE_WAYLAND_DISPLAY=${GAMESCOPE_WAYLAND_DISPLAY} QT_QPA_PLATFORM=${QT_QPA_PLATFORM}"
 
 if [[ "$is_odin3" -eq 1 && -f /etc/sdl2/qcom-gamecontrollerdb.txt ]]; then
@@ -229,6 +267,13 @@ if [[ "${IS_SIDELOAD}" == "0" ]]; then
     -nobootstrapperupdate
     ${STEAM_EXTRA_ARGS:-}
   )
+  if [[ "${ALLOW_CLIENT_UPDATES}" == "1" ]]; then
+    _kept=()
+    for _a in "${STEAM_ARGS[@]}"; do
+      [[ "$_a" == -inhibitbootstrap || "$_a" == -nobootstrapperupdate ]] || _kept+=("$_a")
+    done
+    STEAM_ARGS=("${_kept[@]}")
+  fi
 else
   SIDELOADED_CMDLINE_ARGS_FILE="${HOME}/devkit-game/steamdeckard-argv.json"
   read -ra STEAM_ARGS <<< "$(jq -r '.[0]' "${SIDELOADED_CMDLINE_ARGS_FILE}")"

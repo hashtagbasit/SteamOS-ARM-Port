@@ -51,7 +51,9 @@ rm -f "${STEAMROOT}/.crash" "${STEAMROOT}/steam.pid" 2>/dev/null || true
 # Opt in with `touch ${STEAMROOT}/.allow-client-updates` (or
 # STEAM_ALLOW_CLIENT_UPDATES=1) to follow the selected client beta channel,
 # e.g. the arm64 build shared with the Steam Frame.
+ALLOW_CLIENT_UPDATES=0
 if [[ -e "${STEAMROOT}/.allow-client-updates" || "${STEAM_ALLOW_CLIENT_UPDATES:-0}" == "1" ]]; then
+  ALLOW_CLIENT_UPDATES=1
   rm -f "${STEAMROOT}/steam.cfg" "${STEAMROOT}/${STEAM_RT_ARM64}/steam.cfg" 2>/dev/null || true
 else
   printf '%s\n' \
@@ -237,6 +239,13 @@ if [[ "${IS_SIDELOAD}" == "0" ]]; then
     -nobootstrapperupdate
     ${STEAM_EXTRA_ARGS:-}
   )
+  if [[ "${ALLOW_CLIENT_UPDATES}" == "1" ]]; then
+    _kept=()
+    for _a in "${STEAM_ARGS[@]}"; do
+      [[ "$_a" == -inhibitbootstrap || "$_a" == -nobootstrapperupdate ]] || _kept+=("$_a")
+    done
+    STEAM_ARGS=("${_kept[@]}")
+  fi
 else
   SIDELOADED_CMDLINE_ARGS_FILE="${HOME}/devkit-game/steamdeckard-argv.json"
   read -ra STEAM_ARGS <<< "$(jq -r '.[0]' "${SIDELOADED_CMDLINE_ARGS_FILE}")"

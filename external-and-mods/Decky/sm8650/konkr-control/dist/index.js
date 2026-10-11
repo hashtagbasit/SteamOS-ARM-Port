@@ -18,7 +18,7 @@ const definePlugin = (fn) => (...args) => fn(...args);
 const DFL = window.DFL;
 const SP_REACT = window.SP_REACT;
 const SP_JSX = window.SP_JSX;
-const { useEffect, useState, useCallback } = SP_REACT;
+const { useEffect, useState, useCallback, useRef } = SP_REACT;
 const jsx = SP_JSX.jsx;
 const jsxs = SP_JSX.jsxs;
 
@@ -135,6 +135,119 @@ function applyShortFps(on) {
     apply();
     return true;
 }
+const EVO_MODES = [
+    { data: "default", label: "Default" },
+    { data: "breath", label: "Breath – Single" },
+    { data: "rgb-cycle", label: "Breath – RGB" },
+    { data: "google", label: "Breath – Google" },
+    { data: "static", label: "Static" },
+    { data: "follow", label: "Reactive" },
+    { data: "off", label: "Off" },
+];
+function EvoLighting({ st, refresh }) {
+    const complete = (rgb) => ({ secondary_color: "0000ff", speed: 1, ...rgb });
+    const [cfg, setCfg] = useState(() => complete(st.rgb));
+    const current = useRef(cfg);
+    const pending = useRef([]);
+    const saved = useRef({ ...st.rgb_presets, [cfg.mode]: cfg });
+    const [customize, setCustomize] = useState(false);
+    const timer = useRef(null);
+    const saving = useRef(false);
+    const mounted = useRef(true);
+    const flush = async () => {
+        if (saving.current || !pending.current.length) return;
+        saving.current = true;
+        try {
+            while (pending.current.length) {
+                const c = pending.current.shift();
+                try {
+                    await setRgb(c.mode, c.color, c.brightness, c.secondary_color, c.speed);
+                } catch (e) {
+                    toaster.toast({ title: "Pocket EVO lighting", body: String(e) });
+                }
+            }
+        } finally {
+            saving.current = false;
+            if (mounted.current) refresh();
+        }
+    };
+    useEffect(() => {
+        if (pending.current.length || saving.current) return;
+        const c = complete(st.rgb);
+        current.current = c;
+        saved.current = { ...st.rgb_presets, [c.mode]: c };
+        setCfg(c);
+    }, [JSON.stringify(st.rgb), JSON.stringify(st.rgb_presets)]);
+    useEffect(() => {
+        mounted.current = true;
+        return () => {
+            mounted.current = false;
+            clearTimeout(timer.current);
+            flush();
+        };
+    }, []);
+    const change = (patch) => {
+        const c = { ...current.current, ...patch };
+        current.current = c;
+        saved.current[c.mode] = c;
+        const queue = pending.current;
+        if (queue.length && queue[queue.length - 1].mode === c.mode) queue[queue.length - 1] = c;
+        else queue.push(c);
+        setCfg(c);
+        clearTimeout(timer.current);
+        timer.current = setTimeout(flush, 150);
+    };
+    const colorSliders = (key, title) => {
+        const color = cfg[key] || "000000";
+        return [
+            note(`${title}: #${color.toUpperCase()}`),
+            ...["Red", "Green", "Blue"].map((label, index) => row(jsx(DFL.SliderField, {
+                label: `${title} · ${label}`,
+                value: parseInt(color.slice(index * 2, index * 2 + 2), 16),
+                min: 0, max: 255, step: 1, showValue: true,
+                disabled: !st.sticks_led || cfg.mode === "off",
+                onChange: (v) => {
+                    const old = current.current[key] || "000000";
+                    change({ [key]: old.slice(0, index * 2) + Math.round(v).toString(16).padStart(2, "0") + old.slice(index * 2 + 2) });
+                },
+            }))),
+        ];
+    };
+    const animated = ["breath", "rgb-cycle"].includes(cfg.mode);
+    const editable = !["google", "off"].includes(cfg.mode);
+    const led = st.rgb_status || {};
+    return jsxs(SP_JSX.Fragment, { children: [
+        row(jsx(DFL.DropdownItem, {
+            label: "Pocket EVO stick lighting",
+            description: "Applies to both joystick rings",
+            rgOptions: EVO_MODES, selectedOption: cfg.mode,
+            disabled: !st.sticks_led,
+            onChange: (o) => change(saved.current[o.data] || { ...cfg, mode: o.data }),
+        })),
+        row(jsx(DFL.ToggleField, {
+            label: "Customize", checked: customize,
+            description: "Save color and brightness separately for each effect",
+            onChange: setCustomize,
+        })),
+        ...(customize && editable ? [row(jsx(DFL.SliderField, {
+            label: "Brightness", value: cfg.brightness ?? 160,
+            min: 0, max: 255, step: 5, showValue: true,
+            disabled: !st.sticks_led || cfg.mode === "off",
+            onChange: (v) => change({ brightness: Math.round(v) }),
+        })),
+        ...(["default", "static", "breath", "follow"].includes(cfg.mode) ? colorSliders("color", cfg.mode === "follow" ? "Active color" : "Color") : []),
+        ...(cfg.mode === "follow" ? colorSliders("secondary_color", "Background color") : []),
+        animated ? row(jsx(DFL.SliderField, {
+            label: "Effect speed", value: cfg.speed, min: 0.25, max: 3, step: 0.25,
+            showValue: true, valueSuffix: "×", disabled: !st.sticks_led,
+            onChange: (v) => change({ speed: v }),
+        })) : null] : []),
+        cfg.mode === "google" ? note("Multi-color ring effect; color, brightness and speed are automatic") : null,
+        note(!st.sticks_led ? "Pocket EVO LED serial port is unavailable"
+            : led.error || (led.sleeping ? "Lights paused during sleep" : led.ready ? "LED controller connected" : "Waiting for LED controller")),
+    ] });
+}
+
 function Content() {
     const [st, setSt] = useState(null);
     const [shortFps, setShortFps] = useState(shortFpsWanted());
@@ -210,6 +323,7 @@ function Content() {
             })),
         ] }) : null,
         jsxs(DFL.PanelSection, { title: "Lighting", children: [
+            st.evo_rgb ? jsx(EvoLighting, { st, refresh }) : jsxs(SP_JSX.Fragment, { children: [
             row(jsx(DFL.DropdownItem, {
                 label: "Stick lighting",
                 disabled: !st.sticks_led,
@@ -228,6 +342,7 @@ function Content() {
                 disabled: !st.sticks_led || st.rgb.mode !== "static",
                 onChange: (v) => setRgb(st.rgb.mode, st.rgb.color, v),
             })),
+            ] }),
             st.has_power_led ? row(jsx(DFL.ToggleField, {
                 label: "Power LED",
                 description: "Charging / full / low-battery colours and profile flashes",

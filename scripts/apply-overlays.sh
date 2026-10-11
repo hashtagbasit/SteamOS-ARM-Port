@@ -758,6 +758,7 @@ ln -sfn ../steamos-arm-lower-deck.service \
 # ---------------------------------------------------------------------------
 log "== SM8550 overlay (AYN / AYANEO / Retroid)"
 cp -r --no-preserve=mode,ownership "$SM8550_OVL/." "$R/"
+bash "${SCRIPT_DIR}/install-pocket-evo-led.sh" "$R"
 cp -f "$SM8550_OVL"/etc/inputplumber/capability_maps.d/*.yaml "$R/usr/share/inputplumber/capability_maps/"
 if [[ -d "$R/var/lib/overlays/etc/upper/inputplumber" ]]; then
   cp -r --no-preserve=mode,ownership "$SM8550_OVL/etc/inputplumber/." "$R/var/lib/overlays/etc/upper/inputplumber/"

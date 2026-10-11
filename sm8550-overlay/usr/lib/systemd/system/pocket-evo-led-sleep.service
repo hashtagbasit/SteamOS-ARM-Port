@@ -1,0 +1,16 @@
+[Unit]
+Description=Blank Pocket EVO joystick lighting across sleep
+Before=sleep.target
+After=pocket-evo-led.service
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecCondition=/usr/bin/python3 /usr/lib/pocketevo/pocket_evo_led.py supported
+ExecStart=/usr/bin/python3 /usr/lib/pocketevo/pocket_evo_led.py sleep
+ExecStop=/usr/bin/python3 /usr/lib/pocketevo/pocket_evo_led.py wake
+TimeoutSec=3
+
+[Install]
+WantedBy=sleep.target

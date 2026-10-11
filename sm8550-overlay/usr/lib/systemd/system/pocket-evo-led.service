@@ -1,0 +1,14 @@
+[Unit]
+Description=AYANEO Pocket EVO joystick lighting
+After=systemd-udev-settle.service konkrd.service
+
+[Service]
+Type=simple
+ExecCondition=/usr/bin/python3 /usr/lib/pocketevo/pocket_evo_led.py supported
+ExecStart=/usr/bin/python3 /usr/lib/pocketevo/pocket_evo_led.py run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=3
+
+[Install]
+WantedBy=multi-user.target

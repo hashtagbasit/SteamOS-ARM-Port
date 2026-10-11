@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import subprocess
+import sys
 from typing import Any
 
 import decky
@@ -31,6 +32,32 @@ def rd(path: str, default: str = "") -> str:
             return fh.read().strip()
     except OSError:
         return default
+
+
+def evo_rgb_supported() -> bool:
+    return (rd("/sys/firmware/devicetree/base/model").rstrip("\0") == "AYANEO Pocket EVO"
+            and os.path.isfile("/usr/lib/pocketevo/pocket_evo_led.py"))
+
+
+def evo_rgb_presets(state: dict) -> dict:
+    if "/usr/lib/pocketevo" not in sys.path:
+        sys.path.insert(0, "/usr/lib/pocketevo")
+    from pocket_evo_led import presets
+    return presets(state)
+
+
+def evo_rgb_status() -> dict[str, Any]:
+    try:
+        value = json.loads(rd("/run/pocket-evo-led/status.json", "{}"))
+        if not isinstance(value, dict):
+            value = {}
+    except ValueError:
+        value = {}
+    active = subprocess.run(["systemctl", "is-active", "--quiet", "pocket-evo-led.service"],
+                            timeout=3).returncode == 0
+    if not active:
+        return {"ready": False, "error": "Pocket EVO LED service is not running"}
+    return value or {"ready": False, "error": "Waiting for LED controller"}
 
 
 def load() -> dict[str, Any]:
@@ -160,6 +187,7 @@ class Plugin:
         leds = glob.glob("/sys/class/leds/*joysticks*") + glob.glob("/sys/class/leds/*-joystick") \
             + glob.glob("/sys/class/leds/rgb:[lr][0-9]") + glob.glob("/sys/class/leds/[lr]:r1")
         fit = model == "KONKR Pocket FIT"
+        evo = evo_rgb_supported()
         return {
             "model": model,
             "daemon_name": DAEMON,
@@ -175,11 +203,14 @@ class Plugin:
             # What this device has, so the panel only shows what works here.
             "has_power_led": not ODIN3D and bool(glob.glob("/sys/class/leds/*power-led*")),
             "has_mcu_link": fit and not ODIN3D,
-            "has_breath": not ODIN3D and any(os.path.exists(f"{d}/effect") for d in leds),
+            "has_breath": evo or (not ODIN3D and any(os.path.exists(f"{d}/effect") for d in leds)),
+            "evo_rgb": evo,
+            "rgb_presets": evo_rgb_presets(st) if evo else {},
+            "rgb_status": await asyncio.to_thread(evo_rgb_status) if evo else None,
             "fit_buttons": fit,
             "mcu_enabled": not os.path.exists(BLACKLIST),
             "mcu_loaded": os.path.isdir("/sys/module/konkr_sysbtn"),
-            "sticks_led": bool(leds),
+            "sticks_led": bool(leds) or (evo and os.path.exists("/dev/ttyHS0")),
             "daemon": subprocess.run(["systemctl", "is-active", "--quiet", DAEMON]).returncode == 0,
             "bypass": await asyncio.to_thread(bypass_state),
             **await asyncio.to_thread(telemetry),
@@ -199,10 +230,26 @@ class Plugin:
         save(st)
         return profile
 
-    async def set_rgb(self, mode: str = "static", color: str = "ff3c00", brightness: int = 160, **_: Any) -> dict:
+    async def set_rgb(self, mode: str = "static", color: str = "ff3c00", brightness: int = 160,
+                      secondary_color: str | None = None, speed: float | None = None, **_: Any) -> dict:
         st = load()
-        st["rgb"] = {"mode": mode, "color": color.lstrip("#").lower()[:6],
-                     "brightness": max(0, min(255, int(brightness)))}
+        if evo_rgb_supported():
+            if "/usr/lib/pocketevo" not in sys.path:
+                sys.path.insert(0, "/usr/lib/pocketevo")
+            from pocket_evo_led import normalize
+            cfg = {**st["rgb"], "mode": mode, "color": color, "brightness": brightness}
+            if secondary_color is not None:
+                cfg["secondary_color"] = secondary_color
+            if speed is not None:
+                cfg["speed"] = speed
+            validated = normalize(cfg)
+            saved = evo_rgb_presets(st)
+            saved[mode] = validated
+            st["rgb_presets"] = saved
+            st["rgb"] = validated
+        else:
+            st["rgb"] = {"mode": mode, "color": color.lstrip("#").lower()[:6],
+                         "brightness": max(0, min(255, int(brightness)))}
         save(st)
         return st["rgb"]
 

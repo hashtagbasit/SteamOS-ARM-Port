@@ -1,0 +1,79 @@
+#!/bin/bash
+# pocket-evo-wifi-wake mark|start|watch: Wi-Fi back quickly after s2idle.
+#
+# NetworkManager drops the connection as soon as a sleep is asked for, and
+# after waking it needs a full scan before it reconnects: 12 s with the router
+# on a DFS channel, and sometimes that scan comes back empty and nothing
+# retries it, so the device stays offline until Wi-Fi is turned off and on.
+# The platform daemon (konkrd, odin3d) keeps the network and its channel in
+# /run/konkr/wifi-last; after waking, scan just that channel first (well under
+# a second), then fall back to a new full scan, then to turning Wi-Fi off
+# and on.
+#   mark   before the sleep: remember to watch (network known, radio on)
+#   start  after waking: run "watch" in the background
+#   watch  the retries
+set -u
+WIFI_MARK=/run/pocketevo/wifi-was-connected
+WIFI_LAST=/run/konkr/wifi-last
+log() { echo "wifi-wake: $*"; }
+
+wifi_connected() {
+  [[ $(timeout 3 nmcli -w 2 -t -g GENERAL.STATE device show wlan0 2>/dev/null) == 100* ]]
+}
+
+wifi_wait() {  # wifi_wait <seconds>: true once connected
+  local deadline=$((SECONDS + $1))
+  while ((SECONDS < deadline)); do
+    wifi_connected && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+fast_scan() {
+  local freq ssid deadline
+  { read -r freq; read -r ssid; } <"$WIFI_LAST" 2>/dev/null || return 0
+  [[ $freq =~ ^[0-9]+$ && -n $ssid ]] || return 0
+  # wlan0 comes back a moment after the resume; NetworkManager's own first
+  # scan may already be running (EBUSY), so try for a few seconds.
+  deadline=$((SECONDS + 5))
+  while ((SECONDS < deadline)); do
+    timeout 1 iw dev wlan0 scan trigger freq "$freq" ssid "$ssid" >/dev/null 2>&1 && {
+      log "scanning $freq MHz for the last network"
+      return 0
+    }
+    wifi_connected && return 0
+    sleep 0.25
+  done
+}
+
+watch() {
+  [[ -e $WIFI_MARK ]] || exit 0
+  rm -f "$WIFI_MARK"
+  fast_scan
+  wifi_wait 6 && exit 0
+  log "not back 6 s after waking, starting a new scan"
+  timeout 2 iw dev wlan0 scan abort 2>/dev/null
+  timeout 5 nmcli -w 3 device wifi rescan 2>/dev/null
+  wifi_wait 8 && { log "connected after the new scan"; exit 0; }
+  log "still offline, turning it off and on"
+  timeout 5 nmcli -w 3 radio wifi off && sleep 1 && timeout 5 nmcli -w 3 radio wifi on
+  wifi_wait 10 && log "connected after turning it off and on" || log "still offline"
+}
+
+case "${1:-}" in
+  mark)
+    mkdir -p "${WIFI_MARK%/*}"
+    if [[ -s $WIFI_LAST && $(timeout 3 nmcli -w 2 radio wifi 2>/dev/null) == enabled ]]; then
+      : >"$WIFI_MARK"
+    else
+      rm -f "$WIFI_MARK"
+    fi ;;
+  start)
+    [[ -e $WIFI_MARK ]] || exit 0
+    systemd-run --no-block --quiet --collect --unit=pocket-evo-wifi-wake \
+      /usr/lib/pocketevo/pocket-evo-wifi-wake watch 2>/dev/null || true ;;
+  watch) watch ;;
+  *) echo "usage: pocket-evo-wifi-wake mark|start|watch" >&2; exit 2 ;;
+esac
+exit 0

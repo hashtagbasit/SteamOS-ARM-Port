@@ -5,7 +5,10 @@
 # SM8550 image also ships it as steamos-arm-bootdebug-file.service, for
 # kernels that bring their own initramfs.
 # Right away, then every 20 s for 3 minutes, it writes the logs to BOOT/debug-logs/, which
-# any PC can read. After that perf.txt gets CPU/GPU/SD samples for 30 minutes.
+# any PC can read. During the next 30 minutes, perf.txt gets CPU/GPU/SD
+# samples and runtime journals/audio/sleep evidence are refreshed each minute.
+pocket_evo=0
+tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | grep -qx 'ayaneo,pocketevo' && pocket_evo=1
 out=/boot/debug-logs
 # Low priority for CPU and disk, so a game running meanwhile doesn't stutter.
 renice -n 19 -p $$ >/dev/null 2>&1
@@ -17,6 +20,51 @@ if grep -qE '^[^ ]+ /boot [^ ]+ ro[, ]' /proc/mounts; then
   mount -o remount,rw /boot 2>/dev/null
 fi
 mkdir -p "$out" || { echo "bootdebug: /boot isn't writable, no logs" >&2; exit 0; }
+if [ "$pocket_evo" = 1 ]; then
+{
+  date
+  uname -a
+  cat /etc/os-release
+} > "$out/release.txt" 2>&1
+{
+  for f in /sys/fs/pstore/*; do
+    [ -f "$f" ] || continue
+    echo "--- ${f##*/}"
+    head -c 1048576 "$f"
+  done
+} > "$out/pstore.txt" 2>&1
+fi
+
+runtime_evidence() {
+  [ "$pocket_evo" = 1 ] || return 0
+  journalctl -b --no-pager -o short-monotonic > "$out/journal.txt" 2>&1
+  journalctl -b --no-pager -o short-monotonic _UID=1000 > "$out/journal-user.txt" 2>&1
+  dmesg > "$out/dmesg.txt" 2>&1
+  {
+    echo "--- uptime $(cat /proc/uptime)"
+    cat /proc/asound/cards /proc/asound/pcm
+    for card in /proc/asound/card[0-9]*; do
+      [ -d "$card" ] || continue
+      echo "--- ${card##*/} mixers"
+      timeout 5 amixer -c "${card##*card}" contents
+    done
+    echo "--- PipeWire cards and sinks"
+    timeout 5 runuser -u steamos -- env XDG_RUNTIME_DIR=/run/user/1000 pactl list cards
+    timeout 5 runuser -u steamos -- env XDG_RUNTIME_DIR=/run/user/1000 pactl list sinks
+    echo "--- UCM setup result"
+    cat /tmp/sm8550-alsaucm.log
+  } > "$out/audio.txt" 2>&1
+  {
+    echo "--- uptime $(cat /proc/uptime)"
+    cat /sys/power/state /sys/power/mem_sleep /sys/power/pm_wakeup_irq
+    for f in /sys/power/suspend_stats/*; do
+      [ -f "$f" ] || continue
+      echo "--- ${f##*/}"; cat "$f"
+    done
+    echo "--- sleep mode"
+    timeout 2 /usr/lib/konkr/sleep-mode
+  } > "$out/sleep.txt" 2>&1
+}
 # The boot before this one: after a freeze and a forced restart, that's the
 # one with the answer (the journal is persistent).
 journalctl -b -1 --no-pager -o short-monotonic > "$out/journal-previous-boot.txt" 2>&1
@@ -59,10 +107,15 @@ while [ "$i" -lt 10 ]; do
   # by then) and the last, not every 20 s.
   if [ "$i" -eq 2 ] || [ "$i" -eq 10 ]; then
     runuser -u steamos -- env XDG_RUNTIME_DIR=/run/user/1000 vulkaninfo --summary > "$out/vulkan.txt" 2>&1
+    runtime_evidence
   fi
   sync
 done
-echo "done, $(date)" > "$out/DONE.txt"
+if [ "$pocket_evo" = 1 ]; then
+  echo "boot snapshots done; runtime capture continues, $(date)" > "$out/DONE.txt"
+else
+  echo "done, $(date)" > "$out/DONE.txt"
+fi
 sync
 
 # Then 30 minutes of performance samples every 5 s, so a tester can just play
@@ -86,7 +139,13 @@ while [ "$n" -lt 360 ]; do
   g="-"; [ -n "$gpu" ] && g="$(( $(cat $gpu/cur_freq) / 1000000 )) ($(cat $gpu/load 2>/dev/null || echo ?))"
   t=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1)
   echo "$(cut -d' ' -f1 /proc/uptime) |$c | $g | $(( ${t:-0} / 1000 ))" >> "$out/perf.txt"
-  n=$((n + 1)); [ $((n % 12)) -eq 0 ] && sync
+  n=$((n + 1))
+  if [ $((n % 12)) -eq 0 ]; then
+    runtime_evidence
+    sync
+  fi
   sleep 5
 done
+runtime_evidence
+[ "$pocket_evo" != 1 ] || echo "all capture done, $(date)" > "$out/DONE.txt"
 sync

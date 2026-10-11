@@ -21,6 +21,32 @@ UID_STEAM=1000
 
 log() { echo "konkr-sleep: $*"; }
 
+# Preserve the last reached stage in debug mode: a watchdog reboot can lose
+# the journal tail, and the boot collector stops taking journals after 3 min.
+# Use uptime so clock corrections do not confuse slow pre/post diagnostics.
+step() {
+  local rc message
+  message="stage=$* begin uptime=$(cut -d' ' -f1 /proc/uptime)"
+  log "$message" >&2
+  sleep_debug "$message"
+  "$@"
+  rc=$?
+  message="stage=$* end rc=$rc uptime=$(cut -d' ' -f1 /proc/uptime)"
+  log "$message" >&2
+  sleep_debug "$message"
+  return "$rc"
+}
+
+sleep_debug() {
+  [[ -e /boot/debug ]] || return 0
+  mountpoint -q /boot || return 0
+  mkdir -p /boot/debug-logs 2>/dev/null || return 0
+  printf '%s\n' "$*" >>/boot/debug-logs/sleep-stages.txt
+  # Flush asynchronously so diagnostics do not add a delay at every stage.
+  # Only testers with BOOT/debug use it; a failing SD cannot block this hook.
+  timeout 1 sync /boot/debug-logs/sleep-stages.txt >/dev/null 2>&1 &
+}
+
 as_user() {
   local user
   user=$(id -nu "$UID_STEAM" 2>/dev/null) || return 0
@@ -111,6 +137,16 @@ report_end() {
 # suspend, bound again (a fresh init, not a resume) after. Left alone whenever
 # anything on it is mounted, swapped to or held (an internal install).
 UFS_STATE=/run/konkr/ufs-unbound
+pocket_evo() {
+  tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | grep -qx 'ayaneo,pocketevo'
+}
+
+# Pocket EVO (G3x Gen 2 / SM8550) must keep its UFS driver bound. The
+# captured failed sleep stops inside ufs_off, before kernel suspend begins.
+# The Pocket FIT detach workaround can block in a sysfs write on EVO; a
+# timeout cannot recover a task stuck in uninterruptible kernel I/O. Let
+# ufshcd's PM callbacks handle it, as Armada does, on SD and internal boots.
+# Match the board, not Adreno 740/SM8550 shared by several other handhelds.
 ufs_in_use() {  # $1 = ufshc platform device name
   local blk dev part
   for blk in /sys/block/sd*; do
@@ -126,6 +162,10 @@ ufs_in_use() {  # $1 = ufshc platform device name
 }
 ufs_off() {
   local host name
+  if pocket_evo; then
+    log "ufs: Pocket EVO uses kernel suspend/resume; leaving host bound" >&2
+    return 0
+  fi
   mkdir -p "${UFS_STATE%/*}"; : >"$UFS_STATE"
   for host in /sys/bus/platform/drivers/ufshcd-qcom/*.ufshc; do
     [[ -e $host ]] || continue
@@ -142,6 +182,7 @@ ufs_off() {
 }
 ufs_on() {
   local name
+  pocket_evo && return 0
   [[ -s $UFS_STATE ]] || return 0
   while read -r name; do
     echo "$name" >/sys/bus/platform/drivers/ufshcd-qcom/bind 2>/dev/null || log "ufs: rebind $name failed"
@@ -168,21 +209,21 @@ wifi_watch_start() { /usr/lib/steamos-arm/steamos-arm-wifi-wake start; }
 pre() {
   local n u
   report_start
-  wifi_mark
+  step wifi_mark
   if light; then
     sync
-    u=$(ufs_off)
+    u=$(step ufs_off)
     log "pre: kernel handles the devices, ufs unbound=${u:-none}"
     return
   fi
-  audio 1
+  step audio 1
   wake_sources
-  n=$(touch_off)
+  n=$(step touch_off)
   if [[ -d /sys/module/${WIFI_MODS[0]} ]]; then
-    timeout 15 modprobe -r "${WIFI_MODS[@]}" || log "ath12k unload failed"
+    step timeout 15 modprobe -r "${WIFI_MODS[@]}" || log "ath12k unload failed"
   fi
   sync
-  u=$(ufs_off)
+  u=$(step ufs_off)
   log "pre: audio suspended, touch unbound=$n, wifi=$([[ -d /sys/module/${WIFI_MODS[0]} ]] && echo loaded || echo unloaded), ufs unbound=${u:-none}"
 }
 
@@ -205,18 +246,21 @@ touch_on() {
 
 post() {
   report_end
-  ufs_on
-  wifi_watch_start
+  step ufs_on
   if light; then
+    step wifi_watch_start
     systemctl kill -s HUP konkrd.service >/dev/null 2>&1
     log "post: restored"
     return
   fi
-  touch_on
+  step touch_on
   if [[ ! -d /sys/module/${WIFI_MODS[0]} ]]; then
-    modprobe "${WIFI_MODS[0]}" || log "ath12k reload failed"
+    step timeout 15 modprobe "${WIFI_MODS[0]}" || log "ath12k reload failed"
   fi
-  audio 0
+  # Start the channel scan after the interface has been restored, rather than
+  # spending all fast-scan attempts racing the module reload.
+  step wifi_watch_start
+  step audio 0
   # konkrd re-applies profile clocks/LEDs on SIGHUP
   systemctl kill -s HUP konkrd.service >/dev/null 2>&1
   log "post: restored"

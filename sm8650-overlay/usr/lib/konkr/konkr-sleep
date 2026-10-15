@@ -208,8 +208,8 @@ lights_off() {
 
 pre() {
   local n u x
+  report_start     # first: konkrd stops drawing stick effects on it
   lights_off
-  report_start
   wifi_mark
   x=$(xhci_off)
   if light; then

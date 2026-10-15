@@ -23,11 +23,13 @@ Control: konkrctl (sends SIGHUP after editing state).
 """
 from __future__ import annotations
 
+import colorsys
 import configparser
 import ctypes
 import errno
 import glob
 import json
+import math
 import os
 import re
 import select
@@ -132,8 +134,7 @@ def load_state() -> dict:
     st.setdefault("power_led", True)
     st.setdefault("menu_clicks", True)
     st.setdefault("buttons", {"F13": "rgb-next", "F14": "profile-next"})
-    if st["rgb"].get("mode") == "rainbow":
-        st["rgb"]["mode"] = "static"
+    st["rgb"].setdefault("speed", 50)
     if st["profile"] not in PROFILES:
         st["profile"] = "balanced"
     return st
@@ -747,31 +748,115 @@ def battery() -> tuple[int, str]:
     return -1, ""
 
 
+def stick_rgb(cfg: dict) -> tuple[int, int, int]:
+    color = cfg.get("color", "ff3c00")
+    if not isinstance(color, str) or len(color) != 6 or any(c not in "0123456789abcdefABCDEF" for c in color):
+        color = "ff3c00"
+    return tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def stick_position(d: str, sticks: list[str]) -> float:
+    """Where a stick light sits for the rainbow, 0-1: the zones round each
+    ring (rgb:l1-l4), or one light per side half a turn apart."""
+    n = os.path.basename(d)
+    if n.startswith("rgb:"):
+        side = [s for s in sticks if os.path.basename(s)[4:5] == n[4:5]]
+        return (int(n[5:]) - 1) / max(1, len(side))
+    return 0.5 if n.startswith("right") else 0.0
+
+
 class Leds:
+    # Effects: "breath" pulses one colour, "chroma" takes every light through
+    # the hues together, "rainbow" spreads the hues round the rings and turns
+    # them. The AYN stick lights are drawn here, ANIM_STEP_S apart, at the
+    # state's speed (0-100). The KONKR single LED sends a UART frame to the
+    # MCU on every write, so it runs the MCU's own effects instead: its breath,
+    # and its hue cycle as chroma, at the firmware's one speed.
+    ANIM_MODES = ("breath", "chroma", "rainbow")
+    MCU_EFFECTS = {"breath": "breath", "chroma": "rainbow"}
+    LIVE_MODES = ("battery", "heat")
+    ANIM_STEP_S = 0.1
+    # Seconds per cycle at speed 0 and at speed 100.
+    PERIODS = {"breath": (8.0, 1.0), "chroma": (30.0, 2.0), "rainbow": (12.0, 1.0)}
+
     def __init__(self):
         self.power = led("power-led")
         self.sticks = stick_leds()
+        self.mcu = len(self.sticks) == 1 and os.path.exists(f"{self.sticks[0]}/effect")
+        self.positions = {d: stick_position(d, self.sticks) for d in self.sticks}
         self.flash_until = 0.0
         self.pulse = False
+        self.phase = 0.0
+        self.last_anim = 0.0
+        self.last_frame: dict[str, tuple] = {}
+
+    def modes(self) -> tuple[str, ...]:
+        """The effects these stick lights can show (and off)."""
+        if not self.sticks:
+            return ()
+        if self.mcu:
+            return ("static", *self.MCU_EFFECTS, *self.LIVE_MODES, "off")
+        if len(self.sticks) == 1:      # one light, no effect attr: plain colour
+            return ("static", *self.LIVE_MODES, "off")
+        return ("static", *self.ANIM_MODES, *self.LIVE_MODES, "off")
+
+    def animating(self, st: dict) -> bool:
+        return not self.mcu and len(self.sticks) > 1 and st["rgb"].get("mode") in self.ANIM_MODES
+
+    @classmethod
+    def period(cls, mode: str, speed) -> float:
+        slow, fast = cls.PERIODS[mode]
+        try:
+            s = max(0, min(100, int(speed))) / 100
+        except (TypeError, ValueError):
+            s = 0.5
+        return slow * (fast / slow) ** s
+
+    def animate(self, st: dict, now: float) -> None:
+        dt = now - self.last_anim
+        if dt < self.ANIM_STEP_S:
+            return
+        self.last_anim = now
+        cfg = st["rgb"]
+        mode = cfg.get("mode")
+        # The phase advances by elapsed time, so a speed change doesn't jump.
+        self.phase = (self.phase + min(dt, 1.0) / self.period(mode, cfg.get("speed", 50))) % 1.0
+        bright = max(0, min(255, int(cfg.get("brightness", 160))))
+        for d in self.sticks:
+            if mode == "breath":
+                # 0.06 floor so the light never goes fully dark mid-cycle.
+                level = 0.06 + 0.94 * (0.5 - 0.5 * math.cos(2 * math.pi * self.phase))
+                frame = (stick_rgb(cfg), int(round(bright * level)))
+            else:
+                hue = (self.phase + (self.positions[d] if mode == "rainbow" else 0.0)) % 1.0
+                frame = (tuple(int(round(c * 255)) for c in colorsys.hsv_to_rgb(hue, 1.0, 1.0)), bright)
+            if self.last_frame.get(d) != frame:
+                self.last_frame[d] = frame
+                led_rgb(d, *frame)
 
     def flash(self, rgb) -> None:
         led_rgb(self.power, rgb, 255)
         self.flash_until = time.monotonic() + 2.0
 
-    def tick(self, enabled: bool = True) -> None:
+    def tick(self, enabled: bool = True, mode: str = "charge", profile: str = "balanced") -> None:
+        """mode "charge": amber charging, green full, off otherwise. "profile":
+        the performance profile's colour all the time. Either way a low
+        battery pulses red."""
         if not self.power or time.monotonic() < self.flash_until:
             return
         if not enabled or os.path.exists(STANDBY_FLAG):
             wr(f"{self.power}/brightness", 0)
             return
         cap, status = battery()
-        if status == "Charging":
+        if 0 <= cap < 15 and status != "Charging":
+            self.pulse = not self.pulse
+            led_rgb(self.power, (255, 0, 0), 60 if self.pulse else 0)
+        elif mode == "profile":
+            led_rgb(self.power, PROFILE_RGB.get(profile, PROFILE_RGB["balanced"]), 40)
+        elif status == "Charging":
             led_rgb(self.power, (255, 120, 0), 40)
         elif status == "Full" or (status == "Not charging" and cap >= 99):
             led_rgb(self.power, (0, 255, 0), 30)
-        elif 0 <= cap < 15:
-            self.pulse = not self.pulse
-            led_rgb(self.power, (255, 0, 0), 60 if self.pulse else 0)
         else:
             wr(f"{self.power}/brightness", 0)
 
@@ -805,30 +890,39 @@ class Leds:
     def apply_sticks(self, st: dict) -> None:
         cfg = st["rgb"]
         mode = cfg.get("mode", "static")
-        color = cfg.get("color", "ff3c00")
-        if not isinstance(color, str) or len(color) != 6 or any(c not in "0123456789abcdefABCDEF" for c in color):
-            color = "ff3c00"
-        rgb = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+        rgb = stick_rgb(cfg)
         live = self.live_color(mode)
         if live is not None:
             rgb = live
         self.shown_rgb = (mode, rgb)
+        self.last_frame.clear()
+        if self.animating(st):
+            self.last_anim = 0.0
+            self.animate(st, time.monotonic())
+            return
+        bright = max(0, min(255, int(cfg.get("brightness", 160))))
         for d in self.sticks:
             if mode == "off":
                 wr(f"{d}/brightness", 0)
                 continue
             eff = f"{d}/effect"
-            if mode == "breath" and os.path.exists(eff):
-                wr(eff, "breath {} {} {}".format(*rgb))
+            if self.mcu and mode in self.MCU_EFFECTS:
+                if self.MCU_EFFECTS[mode] == "breath":
+                    # Effect arguments reach the MCU unscaled by brightness.
+                    wr(eff, "breath {} {} {}".format(*(round(c * bright / 255) for c in rgb)))
+                else:
+                    wr(eff, self.MCU_EFFECTS[mode])
                 continue
             if os.path.exists(eff):
                 wr(eff, "static")
-            led_rgb(d, rgb, int(cfg.get("brightness", 160)))
+            led_rgb(d, rgb, bright)
 
 
 RGB_PRESETS = [("static", "ff3c00"), ("static", "00b4ff"), ("static", "a000ff"),
                ("static", "ffffff"), ("breath", "ff0040"), ("off", "000000")]
 STANDBY_FLAG = "/run/konkr-standby"
+# konkr-sleep's s2idle report, written in pre and removed in post.
+SLEEP_FLAG = "/run/konkr/sleep-start"
 
 
 # -------------------------------------------------------------- hotkeys ----
@@ -1300,19 +1394,20 @@ class Daemon:
         log(f"profile {p}")
 
     def set_rgb(self, req: str) -> None:
-        """rgb-set:<static|breath|off>:<rrggbb>:<brightness 0-255> from the
-        bottom-screen dashboard's colour picker."""
+        """rgb-set:<mode>:<rrggbb>:<brightness 0-255>[:<speed 0-100>] from the
+        bottom-screen dashboard's colour picker and Handheld Control."""
         parts = req.split(":")
-        if len(parts) != 4 or parts[1] not in ("static", "breath", "off", "battery", "heat"):
+        if len(parts) not in (4, 5) or parts[1] not in self.leds.modes():
             return
         color = parts[2].lower()
         if len(color) != 6 or any(c not in "0123456789abcdef" for c in color):
             return
         try:
             bri = max(0, min(255, int(parts[3])))
+            speed = max(0, min(100, int(parts[4]))) if len(parts) == 5 else self.st["rgb"].get("speed", 50)
         except ValueError:
             return
-        self.st["rgb"].update(mode=parts[1], color=color, brightness=bri)
+        self.st["rgb"].update(mode=parts[1], color=color, brightness=bri, speed=speed)
         save_state(self.st)
         self.leds.apply_sticks(self.st)
 
@@ -1396,7 +1491,10 @@ class Daemon:
         # and the power key press that woke the device is still queued.
         sleep_offset = time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
         while True:
-            timeout = 0.1 if power_down_at is not None or ayn_down_at is not None else 0.25 if self.touch.active else 0.5
+            # Stick effects are drawn here while awake, not in standby or on
+            # the way into s2idle (konkr-sleep has just turned them off).
+            anim = self.leds.animating(self.st) and not os.path.exists(STANDBY_FLAG)                 and not os.path.exists(SLEEP_FLAG)
+            timeout = 0.1 if anim or power_down_at is not None or ayn_down_at is not None                 else 0.25 if self.touch.active else 0.5
             if os.path.exists(STANDBY_FLAG):
                 last_standby = time.monotonic()
             keys = self.keys.poll(timeout, self.touch)
@@ -1458,12 +1556,16 @@ class Daemon:
             if self.reload:
                 self.reload = False
                 self.conf = load_conf()
+                old_profile = self.st["profile"]
                 self.st = load_state()
-                self.apply_profile()
+                # A reload follows any setting; only a new profile flashes.
+                self.apply_profile(flash=self.st["profile"] != old_profile)
                 self.leds.apply_sticks(self.st)
                 ensure_gamepad_mode(self.conf)
                 ensure_sysbtn_map(self.st)
             now = time.monotonic()
+            if anim:
+                self.leds.animate(self.st, now)
             if now >= next_ui_check:
                 next_ui_check = now + 60.0
                 ensure_webhelper_vulkan()
@@ -1475,7 +1577,7 @@ class Daemon:
                 next_slow = now + 1.0
                 p = self.st["profile"]
                 self.fan.tick(p, game_fan(self.st), os.path.exists(STANDBY_FLAG))
-                self.leds.tick(self.st.get("power_led", True))
+                self.leds.tick(self.st.get("power_led", True), self.st.get("power_led_mode", "charge"), p)
                 # Battery/heat light modes follow the device every 10 s.
                 if now >= next_live and not os.path.exists(STANDBY_FLAG):
                     next_live = now + 10.0

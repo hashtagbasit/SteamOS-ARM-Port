@@ -10,6 +10,9 @@ Usage:
   odin3ctl fan boost [on|off]         Toggle or set temporary fan boost
   odin3ctl fan set <0-255>            Directly set PWM (testing)
   odin3ctl rgb <RRGGBB> [brightness]  Set joystick ring RGB color
+  odin3ctl rgb breath [RRGGBB] [brightness] [speed]  Pulse the rings in one color
+  odin3ctl rgb chroma [brightness] [speed]   Fade the rings through all colors
+  odin3ctl rgb rainbow [brightness] [speed]  Turn a rainbow round the rings
   odin3ctl rgb off                    Turn off joystick ring LEDs
 """
 
@@ -116,7 +119,7 @@ def format_status(data: dict) -> str:
     # RGB
     rgb = data.get("rgb", {})
     if rgb:
-        lines.append(f"Stick RGB    : mode={rgb.get('mode')}, color=#{rgb.get('color')}, brightness={rgb.get('brightness')}")
+        lines.append(f"Stick RGB    : mode={rgb.get('mode')}, color=#{rgb.get('color')}, brightness={rgb.get('brightness')}, speed={rgb.get('speed', 50)}")
 
     return "\n".join(lines)
 
@@ -234,11 +237,28 @@ def main():
         return
 
     if cmd == "rgb":
+        usage = ("Usage: odin3ctl rgb <RRGGBB> [brightness] | rgb breath [RRGGBB] [brightness] [speed]"
+                 " | rgb chroma|rainbow [brightness] [speed] | rgb off   (brightness 0-255, speed 0-100)")
         if len(args) < 2:
-            sys.exit("Usage: odin3ctl rgb <RRGGBB> [brightness] | rgb off")
+            sys.exit(usage)
         if args[1].lower() in ("off", "none", "0"):
             res = send_req("rgb_off")
             print("Stick RGB LEDs turned off" if res.get("status") == "ok" else f"Error: {res.get('error')}")
+        elif args[1].lower() in ("breath", "chroma", "rainbow"):
+            mode, rest = args[1].lower(), args[2:]
+            req = {"mode": mode}
+            if mode == "breath" and rest and len(rest[0]) == 6:
+                req["color"] = rest.pop(0)
+            try:
+                if rest:
+                    req["brightness"] = int(rest.pop(0))
+                if rest:
+                    req["speed"] = int(rest.pop(0))
+            except ValueError:
+                sys.exit(usage)
+            res = send_req("rgb", **req)
+            print(f"Stick RGB mode {mode} (#{res.get('color')}, brightness {res.get('brightness')}, speed {res.get('speed')})"
+                  if res.get("status") == "ok" else f"Error: {res.get('error')}")
         else:
             color = args[1]
             bright = int(args[2]) if len(args) >= 3 else 160

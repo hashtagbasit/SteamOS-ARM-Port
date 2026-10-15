@@ -50,6 +50,9 @@ fi
 
 # Enable mixers for Odin 3 speaker amps
 amixer -c "${card_id}" set 'SECONDARY_MI2S_RX Audio Mixer MultiMedia1' 1 >/dev/null 2>&1 || true
+amixer -c "${card_id}" set 'DISPLAY_PORT_RX_0 Audio Mixer MultiMedia4' 1 >/dev/null 2>&1 || true
+amixer -c "${card_id}" cset name='SPK_L PCM Playback Volume' 0 >/dev/null 2>&1 || true
+amixer -c "${card_id}" cset name='SPK_R PCM Playback Volume' 0 >/dev/null 2>&1 || true
 amixer -c "${card_id}" set 'RX_CODEC_DMA_RX_0 Audio Mixer MultiMedia2' 1 >/dev/null 2>&1 || true
 amixer -c "${card_id}" set 'MultiMedia3 Mixer TX_CODEC_DMA_TX_3' 1 >/dev/null 2>&1 || true
 amixer -c "${card_id}" set 'RX_RX0 Digital Volume' 84 >/dev/null 2>&1 || true

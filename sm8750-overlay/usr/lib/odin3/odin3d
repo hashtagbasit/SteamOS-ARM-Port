@@ -361,11 +361,13 @@ class FanController:
         # does it on every core at once, so the fan holds its speed for a
         # while after a resume.
         self.hot_since: float | None = None
+        self.crit_since: float | None = None
         self.slept: float | None = None
         self.settle_until = 0.0
 
     HOT_HOLD_S = 3.0
-    DANGER_C = 100.0
+    # Past every burst spike seen (103 C): only this is acted on at once.
+    DANGER_C = 110.0
     RESUME_SETTLE_S = 8.0
 
     def tick(self) -> None:
@@ -384,8 +386,17 @@ class FanController:
             self.hw.set_failsafe()
             return
 
-        # Critical Temperature Latch
-        if not self.critical_override and raw_temp >= self.cfg.critical_temp:
+        # Critical: the fan at full until the chip cools. Only for heat that
+        # stays: the hotspot sensors cross 88 C for a second in every burst
+        # (29 times in 4 h of play on an Odin 3, each a 100 % blast for 1-2 s).
+        now_c = time.monotonic()
+        if raw_temp >= self.cfg.critical_temp:
+            if self.crit_since is None:
+                self.crit_since = now_c
+        else:
+            self.crit_since = None
+        sustained = self.crit_since is not None and now_c - self.crit_since >= self.HOT_HOLD_S
+        if not self.critical_override and (sustained or raw_temp >= self.DANGER_C):
             self.critical_override = True
             log(f"ALERT: {raw_temp:.1f}°C >= {self.cfg.critical_temp}°C! Critical thermal override active (100% fan).")
         elif self.critical_override and raw_temp <= self.cfg.critical_exit:

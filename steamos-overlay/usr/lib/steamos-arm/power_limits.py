@@ -15,8 +15,13 @@ steamos-arm-power bridge writes what Steam's Quick Access asks for:
                  500 MHz GPU, far below what 8 W actually affords. The
                  little cores are left alone, they barely draw anything.
   gpu_manual_mhz Steam's "Manual GPU clock": the GPU held at that clock.
+  cpu_limit      CPU underclock, ClusterTune's presets: "small", "medium",
+                 "large", or "custom" with cpu_custom {first cpu: kHz}; absent
+                 or "stock" for none. A ceiling per cluster, little cores
+                 included; less heat for the fan to chase. With a TDP too,
+                 the lower of the two wins.
 
-Nothing here is applied when neither is set, so the profiles behave exactly
+Nothing here is applied when none is set, so the profiles behave exactly
 as before.
 """
 from __future__ import annotations
@@ -134,22 +139,80 @@ def _snap(freqs: list[int], want: float) -> int:
     return below[-1] if below else freqs[0]
 
 
+# ClusterTune's bundled profiles (github.com/AurelioB/ClusterTune, GPL-2.0):
+# max kHz per cluster, by the cluster's first CPU.
+CPU_PRESETS = {
+    "sm8750": {   # CQ8725S, AYN Odin 3
+        "small": {0: 2745600, 6: 3072000},
+        "medium": {0: 2227200, 6: 2246400},
+        "large": {0: 1785600, 6: 1958400},
+    },
+    "sm8550": {   # QCS8550, AYN Odin 2 / Thor, Retroid Pocket 6
+        "small": {0: 1785600, 3: 2323200, 7: 2476800},
+        "medium": {0: 1555200, 3: 2054400, 7: 2092800},
+        "large": {0: 1459200, 3: 1785600, 7: 1843200},
+    },
+}
+# Chips ClusterTune has no profile for: its 8 Gen 2 profiles as shares of
+# each cluster's top clock (little, middle, prime).
+CPU_PRESET_SHARES = {
+    "small": (0.88, 0.83, 0.78),
+    "medium": (0.77, 0.73, 0.66),
+    "large": (0.72, 0.64, 0.58),
+}
+CPU_LIMITS = ("stock", "small", "medium", "large", "custom")
+
+
+def clusters() -> list[dict]:
+    """The CPU clusters, slowest first: first cpu, policy dir, frequencies."""
+    out = []
+    for pol in glob.glob("/sys/devices/system/cpu/cpufreq/policy*"):
+        cpus = _rd(f"{pol}/related_cpus").split()
+        fmax = int(_rd(f"{pol}/cpuinfo_max_freq", "0") or 0)
+        if not cpus or not fmax:
+            continue
+        fmin = int(_rd(f"{pol}/cpuinfo_min_freq", "0") or 0)
+        avail = sorted(int(f) for f in _rd(f"{pol}/scaling_available_frequencies").split() if f.isdigit()) or [fmin, fmax]
+        out.append({"cpu": int(cpus[0]), "cpus": [int(c) for c in cpus], "policy": pol,
+                    "min": fmin, "max": fmax, "freqs": avail})
+    return sorted(out, key=lambda c: (c["max"], c["cpu"]))
+
+
+def cpu_caps(limit: str | None, custom: dict | None = None) -> dict[int, int]:
+    """kHz ceiling per cluster (by first cpu) for an underclock, {} for none."""
+    cl = clusters()
+    if limit == "custom":
+        custom = custom or {}
+        return {c["cpu"]: _snap(c["freqs"], int(custom[str(c["cpu"])]))
+                for c in cl if str(c["cpu"]) in custom}
+    if limit not in CPU_PRESET_SHARES:
+        return {}
+    table = CPU_PRESETS.get(chip(), {}).get(limit)
+    if table and set(table) == {c["cpu"] for c in cl}:
+        return {c["cpu"]: _snap(c["freqs"], table[c["cpu"]]) for c in cl}
+    shares = CPU_PRESET_SHARES[limit]
+    caps = {}
+    for i, c in enumerate(cl):
+        share = shares[0] if i == 0 else shares[2] if i == len(cl) - 1 else shares[1]
+        caps[c["cpu"]] = _snap(c["freqs"], c["max"] * share)
+    return caps
+
+
 def apply(state: dict) -> None:
     frac = _fraction(state.get("tdp"))
-    # CPU: big clusters capped by the TDP; back to full without one.
-    for pol in _big_policies():
-        fmin = int(_rd(f"{pol}/cpuinfo_min_freq", "0") or 0)
-        fmax = int(_rd(f"{pol}/cpuinfo_max_freq", "0") or 0)
-        if not fmax:
-            continue
-        avail = sorted(int(f) for f in _rd(f"{pol}/scaling_available_frequencies").split() if f.isdigit()) or [fmin, fmax]
-        if frac is None:
-            cap = fmax
-        else:
+    under = cpu_caps(state.get("cpu_limit"), state.get("cpu_custom"))
+    big = set(_big_policies())
+    # CPU: big clusters capped by the TDP, every cluster by an underclock;
+    # back to full without either.
+    for c in clusters():
+        pol, fmax, avail = c["policy"], c["max"], c["freqs"]
+        cap = fmax
+        if frac is not None and pol in big:
             em = _energy_model(pol)
             if len(em) < 2:
                 em = [(f, (f / fmax) ** GPU_POWER_EXP) for f in avail]
             cap = _snap(avail, _power_cap(em, frac))
+        cap = min(cap, under.get(c["cpu"], fmax))
         _wr(f"{pol}/scaling_max_freq", cap)
     # GPU: a manual clock wins; else the TDP caps the profile's ceiling.
     d = gpu_dir()

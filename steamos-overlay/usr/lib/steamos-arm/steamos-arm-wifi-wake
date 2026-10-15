@@ -36,9 +36,16 @@ fast_scan() {
   [[ $freq =~ ^[0-9]+$ && -n $ssid ]] || return 0
   # wlan0 comes back a moment after the resume; NetworkManager's own first
   # scan may already be running (EBUSY), so try for a few seconds.
+  # 6 GHz (5925 MHz and up) is a passive-scan band: the radio sends no probe
+  # requests there, so a directed scan finds nothing. Listen for beacons.
+  local args=(freq "$freq" ssid "$ssid") how=
+  if ((freq >= 5925)); then
+    args=(freq "$freq" passive)
+    how=" (passive, 6 GHz)"
+  fi
   for ((i = 0; i < 20; i++)); do
-    iw dev wlan0 scan trigger freq "$freq" ssid "$ssid" >/dev/null 2>&1 && {
-      log "scanning $freq MHz for the last network"
+    iw dev wlan0 scan trigger "${args[@]}" >/dev/null 2>&1 && {
+      log "scanning $freq MHz for the last network$how"
       return 0
     }
     wifi_connected && return 0

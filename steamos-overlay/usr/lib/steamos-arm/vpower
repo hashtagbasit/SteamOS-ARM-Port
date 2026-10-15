@@ -94,8 +94,11 @@ class Estimator:
 
 def kernel_times(b, status):
     """The driver's own estimates, for batteries without charge counters."""
-    full = num(f"{b}/time_to_full_now") if status == "Charging" else None
-    empty = num(f"{b}/time_to_empty_now") if status == "Discharging" else None
+    full = empty = None
+    if status == "Charging":
+        full = num(f"{b}/time_to_full_now") or num(f"{b}/time_to_full_avg")
+    elif status == "Discharging":
+        empty = num(f"{b}/time_to_empty_now") or num(f"{b}/time_to_empty_avg")
     return (full if full and full > 0 else -1), (empty if empty and empty > 0 else -1)
 
 

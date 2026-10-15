@@ -4,7 +4,9 @@
   konkrctl status
   konkrctl profile silent|balanced|turbo|next
   konkrctl rgb RRGGBB [brightness]     static stick colour
-  konkrctl rgb breath RRGGBB | rainbow | off
+  konkrctl rgb breath RRGGBB | chroma | rainbow | off
+  konkrctl rgb speed 0-100              effect speed (AYN stick lights; the
+                                       KONKR MCU has one speed)
   konkrctl mcu status|enable|disable   MCU UART driver (extra buttons + stick RGB; on by default)
   konkrctl monitor                     print key/button events from the pads
                                        (find out what each extra button sends)
@@ -205,8 +207,10 @@ def main() -> None:
         need_root()
         st = load()
         rgb = st.setdefault("rgb", {})
-        if a[1] in ("off", "rainbow"):
+        if a[1] in ("off", "chroma", "rainbow"):
             rgb["mode"] = a[1]
+        elif a[1] == "speed" and len(a) >= 3:
+            rgb["speed"] = max(0, min(100, int(a[2])))
         elif a[1] == "breath" and len(a) >= 3:
             rgb.update(mode="breath", color=a[2].lstrip("#").lower())
         else:

@@ -13,9 +13,16 @@ import glob
 import json
 import os
 import subprocess
+import sys
 from typing import Any
 
 import decky
+
+sys.path.insert(0, "/usr/lib/steamos-arm")
+try:
+    import power_limits
+except ImportError:
+    power_limits = None
 
 ODIN3D = os.path.exists("/usr/lib/odin3/odin3d")
 STATE = "/var/lib/odin3/state.json" if ODIN3D else "/var/lib/konkrd/state.json"
@@ -42,7 +49,6 @@ def tablet() -> bool:
     except OSError:
         return False
     return any(c in compat for c in ("lenovo,tb321fu", "lenovo,elden", "lenovo,baldur"))
-PROFILES = ("silent", "balanced", "turbo")
 ACTIONS = ("profile-next", "rgb-next", "sticks-toggle", "fan-boost", "game", "none")
 
 
@@ -134,6 +140,70 @@ def bypass_state() -> dict[str, Any]:
     return out
 
 
+KONKR_STICK_LED = "/sys/class/leds/konkr:rgb:joysticks"
+EFFECTS = ("static", "breath", "chroma", "rainbow")
+
+
+def stick_leds() -> list[str]:
+    return glob.glob("/sys/class/leds/*joysticks*") + glob.glob("/sys/class/leds/*-joystick") \
+        + glob.glob("/sys/class/leds/rgb:[lr][0-9]") + glob.glob("/sys/class/leds/[lr]:r1")
+
+
+def lights_state(st: dict[str, Any]) -> dict[str, Any]:
+    """Joystick Lights as Steam's Settings page shows them. The daemons draw
+    every effect on the per-LED rings and zones at any speed; the KONKR
+    single LED runs the MCU's own breath and hue cycle (chroma), at one speed."""
+    leds = stick_leds()
+    mcu = os.path.isdir(KONKR_STICK_LED)
+    if not leds:
+        effects: tuple[str, ...] = ()
+    elif mcu:
+        effects = ("static", "breath", "chroma") if os.path.exists(f"{KONKR_STICK_LED}/effect") else ("static",)
+    else:
+        effects = EFFECTS
+    rgb = st["rgb"]
+    mode = rgb.get("mode", "static")
+    effect = rgb.get("last_mode", "static") if mode == "off" else mode
+    return {
+        "present": bool(leds),
+        # The Pocket FIT's lights need the MCU link, which can be turned off.
+        "needs_mcu": not leds and model() == "KONKR Pocket FIT" and not ODIN3D,
+        "effects": list(effects),
+        "has_speed": bool(leds) and not mcu,
+        "enabled": mode != "off",
+        "effect": effect or "static",
+        "color": rgb.get("color", "ff3c00"),
+        "brightness": round(int(rgb.get("brightness", 160)) * 100 / 255),
+        "speed": int(rgb.get("speed", 50)),
+    }
+
+
+def cpu_state(st: dict[str, Any]) -> dict[str, Any]:
+    """CPU underclock (Quick Access > Performance): the choice, each
+    cluster's frequencies and ceiling, and what each preset sets."""
+    if power_limits is None:
+        return {"supported": False}
+    cl = power_limits.clusters()
+    limit = st.get("cpu_limit") or "stock"
+    caps = power_limits.cpu_caps(limit, st.get("cpu_custom"))
+    presets = {name: {str(k): v for k, v in power_limits.cpu_caps(name).items()}
+               for name in ("small", "medium", "large")}
+    return {
+        "supported": bool(cl),
+        "limit": limit,
+        "presets": presets,
+        "clusters": [{
+            "cpu": c["cpu"], "cores": len(c["cpus"]), "max": c["max"], "freqs": c["freqs"],
+            "cap": caps.get(c["cpu"], c["max"]),
+            "now": int(rd(f"{c['policy']}/scaling_max_freq", str(c["max"])) or c["max"]),
+        } for c in cl],
+    }
+
+
+def model() -> str:
+    return rd("/sys/firmware/devicetree/base/model").rstrip("\0")
+
+
 def mode_of(st: dict[str, Any]) -> tuple[str, bool]:
     return st["profile"], bool(st["fan"].get("boost"))
 
@@ -177,18 +247,17 @@ class Plugin:
 
     async def get_state(self, **_: Any) -> dict[str, Any]:
         st = load()
-        model = rd("/sys/firmware/devicetree/base/model").rstrip("\0")
-        leds = glob.glob("/sys/class/leds/*joysticks*") + glob.glob("/sys/class/leds/*-joystick") \
-            + glob.glob("/sys/class/leds/rgb:[lr][0-9]") + glob.glob("/sys/class/leds/[lr]:r1")
-        fit = model == "KONKR Pocket FIT"
+        name = model()
+        fit = name == "KONKR Pocket FIT"
         return {
-            "model": model,
+            "model": name,
             "daemon_name": DAEMON,
             "profile": st["profile"],
             "rgb": st["rgb"],
             "fan": st["fan"],
             "game": game_fan_state(st),
             "power_led": st["power_led"],
+            "power_led_mode": st.get("power_led_mode", "charge"),
             "menu_clicks": st["menu_clicks"],
             "has_flip": tablet(),
             "flip": os.path.exists(FLIP),
@@ -207,11 +276,9 @@ class Plugin:
             # What this device has, so the panel only shows what works here.
             "has_power_led": not ODIN3D and bool(glob.glob("/sys/class/leds/*power-led*")),
             "has_mcu_link": fit and not ODIN3D,
-            "has_breath": not ODIN3D and any(os.path.exists(f"{d}/effect") for d in leds),
             "fit_buttons": fit,
             "mcu_enabled": not os.path.exists(BLACKLIST),
             "mcu_loaded": os.path.isdir("/sys/module/konkr_sysbtn"),
-            "sticks_led": bool(leds),
             "daemon": subprocess.run(["systemctl", "is-active", "--quiet", DAEMON]).returncode == 0,
             "bypass": await asyncio.to_thread(bypass_state),
             **await asyncio.to_thread(telemetry),
@@ -223,20 +290,48 @@ class Plugin:
                                 capture_output=True, timeout=5)
         return await asyncio.to_thread(bypass_state)
 
-    async def set_profile(self, profile: str = "balanced", **_: Any) -> str:
-        if profile not in PROFILES:
-            return load()["profile"]
-        st = load()
-        st["profile"] = profile
-        save(st)
-        return profile
 
-    async def set_rgb(self, mode: str = "static", color: str = "ff3c00", brightness: int = 160, **_: Any) -> dict:
+    async def get_cpu(self, **_: Any) -> dict[str, Any]:
+        return cpu_state(load())
+
+    async def set_cpu(self, limit: str = "stock", custom: dict | None = None, **_: Any) -> dict[str, Any]:
+        """limit: stock / small / medium / large / custom; custom: {first
+        cpu: kHz} for "custom". The daemon applies it on the reload."""
         st = load()
-        st["rgb"] = {"mode": mode, "color": color.lstrip("#").lower()[:6],
-                     "brightness": max(0, min(255, int(brightness)))}
+        if power_limits is None or limit not in power_limits.CPU_LIMITS:
+            return cpu_state(st)
+        if limit == "stock":
+            st.pop("cpu_limit", None)
+        else:
+            st["cpu_limit"] = limit
+        if limit == "custom" and isinstance(custom, dict):
+            st["cpu_custom"] = {str(int(k)): int(v) for k, v in custom.items()}
         save(st)
-        return st["rgb"]
+        return cpu_state(st)
+
+    async def get_lights(self, **_: Any) -> dict[str, Any]:
+        return lights_state(load())
+
+    async def set_lights(self, enabled: bool = True, effect: str = "static", color: str = "ff3c00",
+                         brightness: int = 63, speed: int = 50, **_: Any) -> dict[str, Any]:
+        """Steam Settings > Joystick Lights. brightness and speed are 0-100;
+        turned off, the effect is kept in last_mode (konkrd's sticks toggle
+        brings it back from there too)."""
+        st = load()
+        effects = lights_state(st)["effects"]
+        if effect not in effects:
+            effect = "static"
+        color = str(color).lstrip("#").lower()
+        if len(color) != 6 or any(c not in "0123456789abcdef" for c in color):
+            color = st["rgb"].get("color", "ff3c00")
+        rgb = st["rgb"]
+        rgb.update(mode=effect if enabled else "off", color=color,
+                   brightness=round(max(0, min(100, int(brightness))) * 255 / 100),
+                   speed=max(0, min(100, int(speed))))
+        if not enabled:
+            rgb["last_mode"], rgb["last_color"] = effect, color
+        save(st)
+        return lights_state(st)
 
     async def set_mcu(self, enabled: bool = False, **_: Any) -> bool:
         if enabled:
@@ -312,8 +407,12 @@ class Plugin:
         r = await asyncio.to_thread(subprocess.run, tool)
         return r.returncode == 0
 
-    async def set_power_led(self, on: bool = True, **_: Any) -> bool:
+    async def set_power_led(self, mode: str = "charge", **_: Any) -> str:
+        """"charge" (charging status), "profile" (the performance profile's
+        colour) or "off"."""
         st = load()
-        st["power_led"] = bool(on)
+        st["power_led"] = mode != "off"
+        if mode in ("charge", "profile"):
+            st["power_led_mode"] = mode
         save(st)
-        return st["power_led"]
+        return mode

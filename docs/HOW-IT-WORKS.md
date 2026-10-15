@@ -83,14 +83,32 @@ konkr-game compat %command%    # strict TSO / split locks for crashing games
 
 ### Lighting
 
-- Power LED (PM8550 LPG, RGB): profile colour flash on change (blue/green/red),
-  then amber while charging, green when full, red pulse below 15%.
-- Stick RGB rings (MCU link): static / breath / rainbow / off from KONKR
-  Control, `konkrctl rgb`, or the front-bottom-right button.
+- Power LED (PM8550 LPG, RGB), set in Settings > Customization: "Charging status"
+  flashes the profile colour (blue/green/red) on a change, then shows amber
+  while charging and green when full; "Performance profile" keeps the
+  profile's colour on. Both pulse red below 15%.
+- Stick RGB rings (MCU link): solid / breathe / chroma / off from Steam's
+  Settings > Customization > Joystick Lights (added by Handheld Control), `konkrctl rgb`, or
+  the front-bottom-right button. The MCU draws its own breathe and hue cycle,
+  so there is no speed setting here; on the AYN stick lights and the Odin 3
+  rings the daemon draws every effect, rainbow included, at any speed.
 
-### Quick Access panel: KONKR Control (Decky)
+### Handheld Control (Decky, hidden): settings in Steam's own screens
 
-Profile, live temperature, fan and GPU clock, stick lighting, MCU link toggle,
+It has no panel of its own and hides itself from Decky's list; it puts its
+settings into Steam's screens instead:
+
+- Quick Access > Performance: CPU Limit (Stock, ClusterTune's Small /
+  Medium / Large underclock, or a ceiling per cluster), Fan (live
+  temperature, fan and GPU clock; Auto or Fixed, boost, a per-game choice)
+  and Battery (bypass charging). The performance profile there is Steam's
+  own, served by `steamos-arm-power`; the CPU limit is applied by
+  `power_limits` with Steam's TDP limit, the lower ceiling winning.
+- Quick Access > Quick Settings: Restart into Android (asks first).
+- Settings > Display: short frame limit list; flip screen on the tablets.
+- Settings > Customization: Joystick Lights, Power LED, and the Pocket FIT's
+  buttons, MCU link and menu clicks.
+
 It replaces the SM8550-Power and SM8550-LED plugins,
 which would fight `konkrd` over the fan and drive AYN-only LEDs.
 

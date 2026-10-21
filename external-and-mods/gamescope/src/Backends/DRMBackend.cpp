@@ -3197,6 +3197,28 @@ namespace gamescope
 
 	void CDRMConnector::ParseEDID()
 	{
+		auto collectModeRefreshRates = [this]()
+		{
+			m_Mutable.ValidDynamicRefreshRates.clear();
+			if ( GetScreenType() != GAMESCOPE_SCREEN_TYPE_INTERNAL )
+				return;
+			const drmModeModeInfo *pPreferredMode = find_mode( m_pConnector.get(), 0, 0, 0 );
+			if ( !pPreferredMode )
+				return;
+			for ( int i = 0; i < m_pConnector->count_modes; i++ )
+			{
+				const drmModeModeInfo *pMode = &m_pConnector->modes[i];
+				if ( pMode->hdisplay != pPreferredMode->hdisplay || pMode->vdisplay != pPreferredMode->vdisplay )
+					continue;
+				if ( !Algorithm::Contains( m_Mutable.ValidDynamicRefreshRates, pMode->vrefresh ) )
+					m_Mutable.ValidDynamicRefreshRates.push_back( pMode->vrefresh );
+			}
+			std::sort( m_Mutable.ValidDynamicRefreshRates.begin(), m_Mutable.ValidDynamicRefreshRates.end() );
+			if ( m_Mutable.ValidDynamicRefreshRates.size() > 1 )
+				drm_log.infof( "Connector %s: no EDID, %zu refresh rates from the panel mode list",
+					m_Mutable.szName, m_Mutable.ValidDynamicRefreshRates.size() );
+		};
+
 		// Fixed DSI panels can have a known display profile without an EDID.
 		auto readEDID = [this]() -> di_info *
 		{
@@ -3267,12 +3289,19 @@ namespace gamescope
 		bool bHasKnownHDRInfo = false;
 		sol::optional<float> ofScriptMaxCLL, ofScriptMaxFALL, ofScriptMinCLL;
 
-		m_Mutable.ValidDynamicRefreshRates.clear();
-		m_Mutable.fnDynamicModeGenerator = nullptr;
 		{
 			CScriptScopedLock script;
 
-			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, m_Mutable.szMakePNP, uProduct, m_Mutable.szModel, m_Mutable.szDataString, m_Mutable.szName );
+			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, m_Mutable.szMakePNP, uProduct, m_Mutable.szModel, m_Mutable.szDataString, m_Mutable.szName, pEdid ? "" : "ayn_odin2_portal" );
+			// Only the board-and-DSI-gated Portal profile may bypass missing EDID.
+			if ( !pEdid && ( !oKnownDisplay || oKnownDisplay->first != "ayn_odin2_portal" ) )
+			{
+				collectModeRefreshRates();
+				return;
+			}
+
+			m_Mutable.ValidDynamicRefreshRates.clear();
+			m_Mutable.fnDynamicModeGenerator = nullptr;
 			if ( oKnownDisplay )
 			{
 				sol::table tTable = oKnownDisplay->second;
@@ -3371,9 +3400,9 @@ namespace gamescope
 					bHasKnownHDRInfo = true;
 				}
 			}
-			if ( !m_Mutable.fnDynamicModeGenerator )
+			if ( !oKnownDisplay || ( oKnownDisplay->first == "ayn_odin2_portal" && !m_Mutable.fnDynamicModeGenerator ) )
 			{
-				// Without a mode generator, use only modes advertised by the kernel.
+				// Preserve the unknown-display fallback; the Portal also uses kernel modes.
 				if ( GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL || cv_drm_allow_dynamic_modes_for_external_display )
 				{
 					const drmModeModeInfo *pPreferredMode = find_mode( m_pConnector.get(), 0, 0, 0 );

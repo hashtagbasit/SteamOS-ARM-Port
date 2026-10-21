@@ -106,8 +106,10 @@ static void obj_del(struct drv *d, enum obj_type t, uint32_t id)
 
 /* ---------------- configs ---------------- */
 
-static int profile_ok(VAProfile p)
+static int profile_ok(struct drv *d, VAProfile p)
 {
+	if (p == VAProfileAV1Profile0)
+		return d->av1;
 	for (unsigned i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
 		if (profiles[i] == p)
 			return 1;
@@ -116,10 +118,11 @@ static int profile_ok(VAProfile p)
 
 static VAStatus QueryConfigProfiles(VADriverContextP ctx, VAProfile *list, int *num)
 {
-	(void)ctx;
 	int n = 0;
 	for (unsigned i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
 		list[n++] = profiles[i];
+	if (DRV(ctx)->av1)
+		list[n++] = VAProfileAV1Profile0;
 	*num = n;
 	return VA_STATUS_SUCCESS;
 }
@@ -128,7 +131,7 @@ static VAStatus QueryConfigEntrypoints(VADriverContextP ctx, VAProfile p,
 				       VAEntrypoint *list, int *num)
 {
 	(void)ctx;
-	if (!profile_ok(p))
+	if (!profile_ok(DRV(ctx), p))
 		return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 	list[0] = VAEntrypointVLD;
 	*num = 1;
@@ -159,7 +162,7 @@ static VAStatus GetConfigAttributes(VADriverContextP ctx, VAProfile p, VAEntrypo
 				    VAConfigAttrib *a, int n)
 {
 	(void)ctx;
-	if (!profile_ok(p))
+	if (!profile_ok(DRV(ctx), p))
 		return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 	if (e != VAEntrypointVLD)
 		return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
@@ -171,7 +174,7 @@ static VAStatus CreateConfig(VADriverContextP ctx, VAProfile p, VAEntrypoint e,
 			     VAConfigAttrib *a, int n, VAConfigID *id)
 {
 	struct drv *d = DRV(ctx);
-	if (!profile_ok(p))
+	if (!profile_ok(DRV(ctx), p))
 		return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 	if (e != VAEntrypointVLD)
 		return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
@@ -620,6 +623,9 @@ static VAStatus DestroyContext(VADriverContextP ctx, VAContextID id)
 	}
 	dec_close(c);
 	free(c->slices);
+	free(c->av1_slices);
+	free(c->av1_deferred.data);
+	free(c->tiles);
 	free(c->nal);
 	free(c);
 	UNLOCK(d);
@@ -743,6 +749,9 @@ static VAStatus BeginPicture(VADriverContextP ctx, VAContextID cid, VASurfaceID 
 	c->nslices = 0;
 	c->nal_len = 0;
 	c->idr = 0;
+	c->av1_nslices = 0;
+	c->av1_ntiles = 0;
+	c->tiles_len = 0;
 	memset(c->pps_used, 0, sizeof(c->pps_used));
 	UNLOCK(d);
 	return VA_STATUS_SUCCESS;
@@ -795,6 +804,51 @@ static VAStatus add_slices(struct context *c, const struct buffer *data)
 	return VA_STATUS_SUCCESS;
 }
 
+static VAStatus render_av1(struct context *c, struct buffer *b)
+{
+	switch (b->type) {
+	case VAPictureParameterBufferType:
+		memset(&c->av1, 0, sizeof(c->av1));
+		memcpy(&c->av1, b->data, b->size < sizeof(c->av1) ? b->size : sizeof(c->av1));
+		c->have_pic = 1;
+		break;
+	case VASliceParameterBufferType: {
+		VASliceParameterBufferAV1 *ns = realloc(c->av1_slices, b->num * sizeof(*ns));
+		if (!ns)
+			return VA_STATUS_ERROR_ALLOCATION_FAILED;
+		c->av1_slices = ns;
+		memcpy(ns, b->data, b->num * sizeof(*ns));
+		c->av1_nslices = b->num;
+		break;
+	}
+	case VASliceDataBufferType:
+		if (!c->have_pic || av1_add_tiles(c, b))
+			return VA_STATUS_ERROR_INVALID_PARAMETER;
+		break;
+	default:
+		break;
+	}
+	return VA_STATUS_SUCCESS;
+}
+
+static VAStatus end_av1(struct drv *d, struct context *c)
+{
+	uint8_t *frame = NULL;
+	VAStatus st = VA_STATUS_ERROR_DECODING_ERROR;
+	if (c->have_pic && !c->failed && !av1_finish_refs(c)) {
+		size_t n = av1_build(c, &frame);
+		if (n && !dec_submit(c, frame, n, c->target) &&
+		    !dec_wait(c, c->target, 1000))
+			st = VA_STATUS_SUCCESS;
+	}
+	free(frame);
+	if (st != VA_STATUS_SUCCESS) {
+		c->target->error = 1;
+		c->failed = 1;
+	}
+	return st;
+}
+
 static VAStatus RenderPicture(VADriverContextP ctx, VAContextID cid, VABufferID *bufs, int n)
 {
 	struct drv *d = DRV(ctx);
@@ -806,6 +860,10 @@ static VAStatus RenderPicture(VADriverContextP ctx, VAContextID cid, VABufferID 
 		if (!b) {
 			st = VA_STATUS_ERROR_INVALID_BUFFER;
 			break;
+		}
+		if (c->cfg.profile == VAProfileAV1Profile0) {
+			st = render_av1(c, b);
+			continue;
 		}
 		switch (b->type) {
 		case VAPictureParameterBufferType:
@@ -849,6 +907,12 @@ static VAStatus EndPicture(VADriverContextP ctx, VAContextID cid)
 	if (!c || !c->target) {
 		UNLOCK(d);
 		return VA_STATUS_ERROR_INVALID_CONTEXT;
+	}
+	if (c->cfg.profile == VAProfileAV1Profile0) {
+		VAStatus st = end_av1(d, c);
+		c->target = NULL;
+		UNLOCK(d);
+		return st;
 	}
 	if (c->failed || !c->nal_len) {
 		c->target->error = 1;
@@ -1173,7 +1237,8 @@ VAStatus __attribute__((visibility("default"))) __vaDriverInit_1_17(VADriverCont
 		free(d);
 		return VA_STATUS_ERROR_UNKNOWN;
 	}
-	dbg(d, "decoder %s", d->dec_path);
+	d->av1 = !getenv("MSM_VA_NO_AV1") && dec_has_av1(d->dec_path);
+	dbg(d, "decoder %s%s", d->dec_path, d->av1 ? " (AV1 too)" : "");
 
 	ctx->pDriverData = d;
 	ctx->version_major = VA_MAJOR_VERSION;

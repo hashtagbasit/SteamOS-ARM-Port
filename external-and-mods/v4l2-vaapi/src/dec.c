@@ -33,6 +33,23 @@ static int xioctl(int fd, unsigned long req, void *arg)
 	return r;
 }
 
+#ifndef V4L2_PIX_FMT_AV1
+#define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
+#endif
+
+int dec_has_av1(const char *path)
+{
+	int fd = open(path, O_RDWR | O_CLOEXEC), ok = 0;
+	if (fd < 0)
+		return 0;
+	struct v4l2_fmtdesc f = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
+	for (f.index = 0; !xioctl(fd, VIDIOC_ENUM_FMT, &f); f.index++)
+		if (f.pixelformat == V4L2_PIX_FMT_AV1)
+			ok = 1;
+	close(fd);
+	return ok;
+}
+
 int dec_find(char *path, size_t len)
 {
 	for (int i = 0; i < 64; i++) {
@@ -83,7 +100,8 @@ int dec_open(struct context *c)
 	xioctl(c->fd, VIDIOC_SUBSCRIBE_EVENT, &sub);
 
 	struct v4l2_format f = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
-	f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
+	f.fmt.pix_mp.pixelformat = c->cfg.profile == VAProfileAV1Profile0 ? V4L2_PIX_FMT_AV1 :
+				   V4L2_PIX_FMT_H264;
 	f.fmt.pix_mp.width = c->width;
 	f.fmt.pix_mp.height = c->height;
 	f.fmt.pix_mp.num_planes = 1;

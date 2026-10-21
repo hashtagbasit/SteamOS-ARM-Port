@@ -4,6 +4,7 @@
 #include "vkroots.h"
 #include "xcb_helpers.hpp"
 #include "vulkan_operators.hpp"
+#include "hdr_formats.hpp"
 #include "gamescope-swapchain-client-protocol.h"
 #include "gamescope-limiter-client-protocol.h"
 #include "../src/color_helpers.h"
@@ -864,19 +865,6 @@ namespace GamescopeWSILayer {
       return res;
     }
 
-    static constexpr std::array<VkSurfaceFormat2KHR, 3> s_ExtraHDRSurfaceFormat2s = {{
-      { .surfaceFormat = { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT, } },
-      { .surfaceFormat = { VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT, } },
-      { .surfaceFormat = { VK_FORMAT_R16G16B16A16_SFLOAT,      VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT, } },
-    }};
-
-    static constexpr auto s_ExtraHDRSurfaceFormats = []() {
-      std::array<VkSurfaceFormatKHR, s_ExtraHDRSurfaceFormat2s.size()> array;
-      for (size_t i = 0; i < s_ExtraHDRSurfaceFormat2s.size(); i++)
-        array[i] = s_ExtraHDRSurfaceFormat2s[i].surfaceFormat;
-      return array;
-    }();
-
     static VkResult GetPhysicalDeviceSurfaceFormatsKHR(
       const vkroots::VkInstanceDispatch* pDispatch,
             VkPhysicalDevice             physicalDevice,
@@ -896,9 +884,16 @@ namespace GamescopeWSILayer {
           !(canBypass || gamescopeSurface->canBypassXWayland(true)))
         return pDispatch->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, selectedSurface, pSurfaceFormatCount, pSurfaceFormats);
 
+      std::vector<VkSurfaceFormatKHR> hdrFormats;
+      VkResult res = queryHDRFormats(
+        pDispatch->GetPhysicalDeviceSurfaceFormatsKHR,
+        physicalDevice, surface, hdrFormats);
+      if (res != VK_SUCCESS)
+        return res;
+
       return vkroots::helpers::append(
         pDispatch->GetPhysicalDeviceSurfaceFormatsKHR,
-        s_ExtraHDRSurfaceFormats,
+        hdrFormats,
         pSurfaceFormatCount,
         pSurfaceFormats,
         physicalDevice,
@@ -925,9 +920,22 @@ namespace GamescopeWSILayer {
           !(canBypass || gamescopeSurface->canBypassXWayland(true)))
         return pDispatch->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, &surfaceInfo, pSurfaceFormatCount, pSurfaceFormats);
 
+      std::vector<VkSurfaceFormatKHR> formats;
+      VkResult res = queryHDRFormats(
+        pDispatch->GetPhysicalDeviceSurfaceFormatsKHR,
+        physicalDevice, pSurfaceInfo->surface, formats);
+      if (res != VK_SUCCESS)
+        return res;
+      std::vector<VkSurfaceFormat2KHR> hdrFormats;
+      for (const auto &format : formats)
+        hdrFormats.push_back({
+          .sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR,
+          .surfaceFormat = format,
+        });
+
       return vkroots::helpers::append(
         pDispatch->GetPhysicalDeviceSurfaceFormats2KHR,
-        s_ExtraHDRSurfaceFormat2s,
+        hdrFormats,
         pSurfaceFormatCount,
         pSurfaceFormats,
         physicalDevice,
@@ -1221,7 +1229,7 @@ namespace GamescopeWSILayer {
         return pDispatch->CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
       }
 
-      // Only the colorspaces we expose in s_ExtraHDRSurfaceFormat2s count as
+      // Only the colorspaces we expose in supportedHDRFormats count as
       // HDR. Other non-sRGB colorspaces are still SDR content Wine can blit.
       const bool hdrColorspace = pCreateInfo->imageColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ||
                                   pCreateInfo->imageColorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;

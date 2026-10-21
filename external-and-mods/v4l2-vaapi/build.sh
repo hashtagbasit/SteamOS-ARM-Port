@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds msm_drv_video.so (VA-API over the V4L2 video decoder) and the
-# libgbm.so.1 NV12 shim in a Debian bookworm container (glibc 2.36), so the
+# libgbm.so.1 NV12/P010 shim in a Debian bookworm container (glibc 2.36), so the
 # same binaries load on the host and inside Flatpak runtimes.
 #   OUT=<dir> ./build.sh        (default: ./out)
 set -euo pipefail

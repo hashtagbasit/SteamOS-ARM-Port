@@ -243,7 +243,7 @@ namespace gamescope
     // GamescopeScript_t
     //
 
-    std::optional<std::pair<std::string_view, sol::table>> GamescopeScript_t::Config_t::LookupDisplay( CScriptScopedLock &script, std::string_view psvVendor,  uint16_t uProduct, std::string_view psvModel, std::string_view psvDataString )
+    std::optional<std::pair<std::string_view, sol::table>> GamescopeScript_t::Config_t::LookupDisplay( CScriptScopedLock &script, std::string_view psvVendor,  uint16_t uProduct, std::string_view psvModel, std::string_view psvDataString, std::string_view psvConnector, std::string_view psvProfile )
     {
         int nMaxPrority = -1;
         std::optional<std::pair<std::string_view, sol::table>> oOutDisplay;
@@ -253,9 +253,13 @@ namespace gamescope
         tDisplay["product"] = uProduct;
         tDisplay["model"] = psvModel;
         tDisplay["data_string"] = psvDataString;
+        tDisplay["connector"] = psvConnector;
 
         for ( auto iter : KnownDisplays )
         {
+            if ( !psvProfile.empty() && iter.first.as<std::string_view>() != psvProfile )
+                continue;
+
             sol::optional<sol::table> otTable = iter.second.as<sol::optional<sol::table>>();
             if ( !otTable )
                 continue;

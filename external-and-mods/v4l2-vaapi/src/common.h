@@ -23,9 +23,11 @@
 #include <stddef.h>
 #include <va/va.h>
 #include <va/va_backend.h>
+#include <va/va_dec_av1.h>
 #include <va/va_drmcommon.h>
+#include "../formats.h"
 
-#define MAX_PROFILES 4
+#define MAX_PROFILES 5
 #define MAX_SLOTS 32
 #define NUM_OUT_BUFS 6
 #define MAX_INFLIGHT 64
@@ -42,6 +44,8 @@ struct drv {
 	pthread_mutex_t lock;
 	int render_fd;               /* our own render node, never the client's */
 	char dec_path[32];           /* /dev/videoN of the decoder */
+	int av1;                     /* the decoder takes AV1 too */
+	int p010;                    /* linear 10-bit capture is available */
 	struct obj_table tab[O_MAX];
 	int debug;
 	FILE *log;
@@ -52,12 +56,21 @@ struct drv {
 struct config {
 	VAProfile profile;
 	VAEntrypoint entrypoint;
+	uint32_t rt_format;
 };
 
 struct context;
 
+/* What the AV1 header writer remembers about frames the client may still reference. */
+struct av1_ref {
+	VASurfaceID id;
+	uint8_t order_hint;
+	int32_t gm[8][6];
+};
+
 struct surface {
 	uint32_t width, height;      /* as created */
+	uint32_t fourcc;
 	uint32_t pitch;              /* luma and chroma row pitch */
 	uint32_t uv_offset;
 	uint32_t size;
@@ -97,6 +110,7 @@ struct context {
 	int decode_order;            /* firmware returns pictures in decode order */
 	int late_output;             /* pictures come back a frame late: don't wait for them */
 	uint32_t cap_pitch, cap_height, cap_size, cap_count;
+	uint32_t cap_fourcc;
 	void *cap_map[MAX_SLOTS];
 	struct surface *slot_owner[MAX_SLOTS];
 	unsigned next_slot;
@@ -114,6 +128,23 @@ struct context {
 	size_t nal_len, nal_cap;
 	int idr;
 	uint8_t pps_used[256 / 8];
+
+	/* AV1: the picture being built, and what past pictures taught us */
+	VADecPictureParameterBufferAV1 av1;
+	VASliceParameterBufferAV1 *av1_slices;
+	unsigned av1_nslices;
+	uint8_t *tiles;              /* tile data in decode order */
+	size_t tiles_len, tiles_cap;
+	unsigned av1_ntiles;
+	struct av1_ref av1_refs[16];
+	uint8_t av1_seq[48];         /* sequence header last sent */
+	int av1_seq_len;
+	VASurfaceID av1_slot[8];     /* what each reference slot of the decoder holds (0: nothing) */
+	struct {
+		uint8_t *data;
+		size_t len, refresh_bit;
+		VASurfaceID surface;
+	} av1_deferred;
 
 	/* parameter sets last sent to the firmware */
 	uint8_t sps[96];
@@ -157,7 +188,14 @@ int h264_parse_slice(struct context *c, const VASliceParameterBufferH264 *sp,
 size_t h264_write_sps(const struct context *c, uint8_t *out, size_t cap);
 size_t h264_write_pps(const struct context *c, int pps_id, uint8_t *out, size_t cap);
 
+/* av1.c */
+int av1_add_tiles(struct context *c, const struct buffer *data);
+size_t av1_build(struct context *c, uint8_t **out);
+int av1_finish_refs(struct context *c);
+
 /* dec.c */
+int dec_has_av1(const char *path);
+int dec_has_p010(const char *path);
 int dec_find(char *path, size_t len);
 int dec_open(struct context *c);
 void dec_close(struct context *c);

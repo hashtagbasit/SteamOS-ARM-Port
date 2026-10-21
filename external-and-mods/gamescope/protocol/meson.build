@@ -1,7 +1,7 @@
 fs = import('fs')
 
 wayland_scanner_dep = dependency('wayland-scanner', native: true)
-wayland_scanner_path = wayland_scanner_dep.get_variable(pkgconfig: 'wayland_scanner')
+wayland_scanner_path = wayland_scanner_dep.get_variable('wayland_scanner')
 wayland_scanner = find_program(wayland_scanner_path, native: true)
 
 wayland_protos = dependency('wayland-protocols',

@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Guard the Portal's patched SDL at stream launch, without replacing Steam files."""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+
+
+BUNDLE = Path(__file__).resolve().parent / "streaming-hdr"
+BOARD = Path("/proc/device-tree/compatible")
+
+
+def hdr_library(root):
+    if not (root / ".pyrowave-box64").exists() or (root / ".no-hdr-box64").exists():
+        return None
+    if b"ayn,odin2portal" not in BOARD.read_bytes().split(b"\0"):
+        return None
+    manifest = json.loads((BUNDLE / "manifest.json").read_text())
+    library = BUNDLE / "libSDL3.so.0"
+    for path, key in ((root / "steamrt64/libSDL3.so.0", "steam_sdl_sha256"),
+                      (library, "libSDL3_sha256")):
+        if hashlib.sha256(path.read_bytes()).hexdigest() != manifest[key]:
+            raise RuntimeError(f"SDL compatibility check failed for {path.name}")
+    with library.open("rb") as stream:
+        header = stream.read(20)
+    if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
+        raise RuntimeError("HDR SDL is not an x86-64 library")
+    devices = sorted(Path("/dev/dri").glob("renderD*"))
+    if len(devices) != 1:
+        raise RuntimeError("HDR probe requires one unambiguous DRM render device")
+    av1 = runpy.run_path(str(Path(__file__).with_name("sm8550-steam-av1")))
+    av1["probe_av1"](devices[0], 0x100)  # VA_RT_FORMAT_YUV420_10
+    return library
+
+
+def main(root, arguments):
+    environment = os.environ.copy()
+    try:
+        library = hdr_library(root)
+    except (OSError, RuntimeError, ValueError, KeyError) as error:
+        print(f"SteamOS ARM: HDR unavailable; using stock SDL: {error}", file=sys.stderr)
+        library = None
+    if library:
+        existing = environment.get("BOX64_LD_PRELOAD", "")
+        environment["BOX64_LD_PRELOAD"] = str(library) + (":" + existing if existing else "")
+        print("SteamOS ARM: compatible Portal HDR SDL and AV1 P010 config available",
+              file=sys.stderr)
+    os.execvpe("box64", ["box64", str(root / "steamrt64/streaming_client"), *arguments],
+              environment)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit("usage: sm8550-streaming-client <Steam root> [client arguments]")
+    main(Path(sys.argv[1]), sys.argv[2:])

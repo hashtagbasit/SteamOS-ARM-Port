@@ -78,6 +78,42 @@ class SteamAV1Tests(unittest.TestCase):
             self.make_client(root)
             self.assertFalse(bridge.uses_box64_client(root, "steamrtarm64"))
 
+    @mock.patch.object(bridge.shutil, "which", return_value="/usr/bin/box64")
+    def test_guarded_hdr_launcher_is_recognized_only_when_installed(self, which):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wrapper, _ = self.make_client(root)
+            helper = root / "hdr-helper"
+            helper.touch(mode=0o755)
+            with mock.patch.object(bridge, "HDR_LAUNCHER", helper):
+                wrapper.write_text(bridge.launcher_source(root, hdr=True))
+                self.assertTrue(bridge.uses_box64_client(root, "steamrtarm64"))
+                helper.unlink()
+                self.assertFalse(bridge.uses_box64_client(root, "steamrtarm64"))
+
+    @mock.patch.object(bridge.shutil, "which", return_value="/usr/bin/box64")
+    def test_stock_launcher_is_upgraded_without_losing_av1(self, which):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wrapper, _ = self.make_client(root)
+            path = root / "steamui/sp.js"
+            path.parent.mkdir()
+            path.write_text(bridge.CALL + "(cb);")
+            helper = root / "hdr-helper"
+            helper.touch(mode=0o755)
+            with mock.patch.object(bridge, "HDR_LAUNCHER", helper), \
+                    mock.patch.object(bridge.Path, "glob", return_value=[Path("/dev/dri/renderD128")]), \
+                    mock.patch.object(bridge, "probe_av1") as probe:
+                bridge.main(root, "steamrtarm64")
+                self.assertEqual(wrapper.read_text(), bridge.launcher_source(root, hdr=True))
+                self.assertTrue(bridge.uses_box64_client(root, "steamrtarm64"))
+                first = path.read_text()
+                bridge.main(root, "steamrtarm64")
+                self.assertEqual(path.read_text(), first)
+                self.assertEqual(probe.call_args.args, (Path("/dev/dri/renderD128"),))
+                subprocess.run(["sh", "-n", str(wrapper)], check=True)
+            self.assertEqual(wrapper.stat().st_mode & 0o777, 0o755)
+
     def test_stale_bridge_is_removed_before_probe_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -96,6 +96,10 @@ export _STEAM_SETENV_MANAGER=1
 export SteamDeck=1
 export STEAM_MULTIPLE_XWAYLANDS=1
 export STEAM_GAMESCOPE_HDR_SUPPORTED=0
+if grep -zqxF "ayn,odin2portal" /sys/firmware/devicetree/base/compatible 2>/dev/null; then
+  # The connector profile still decides whether HDR is available.
+  export STEAM_GAMESCOPE_HDR_SUPPORTED=1
+fi
 export STEAM_ENABLE_VOLUME_HANDLER="${STEAM_ENABLE_VOLUME_HANDLER:-0}"
 export SRT_URLOPEN_PREFER_STEAM=1
 export ENABLE_GAMESCOPE_WSI=1

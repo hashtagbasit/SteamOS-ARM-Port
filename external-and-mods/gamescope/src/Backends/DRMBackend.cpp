@@ -3197,94 +3197,67 @@ namespace gamescope
 
 	void CDRMConnector::ParseEDID()
 	{
-		// SteamOS-ARM-SM8650: DSI panels (KONKR Pocket FIT) have no EDID. Without
-		// this, the early returns below skip the "unknown internal display ->
-		// use every listed mode's refresh" fallback, the refresh table stays
-		// empty and Steam offers no refresh-rate slider.
-		auto collectModeRefreshRates = [this]()
+		// Fixed DSI panels can have a known display profile without an EDID.
+		auto readEDID = [this]() -> di_info *
 		{
-			m_Mutable.ValidDynamicRefreshRates.clear();
-			if ( GetScreenType() != GAMESCOPE_SCREEN_TYPE_INTERNAL )
-				return;
-			const drmModeModeInfo *pPreferredMode = find_mode( m_pConnector.get(), 0, 0, 0 );
-			if ( !pPreferredMode )
-				return;
-			for ( int i = 0; i < m_pConnector->count_modes; i++ )
+			if ( !GetProperties().EDID )
+				return nullptr;
+
+			uint64_t ulBlobId = GetProperties().EDID->GetCurrentValue();
+			if ( !ulBlobId )
+				return nullptr;
+
+			drmModePropertyBlobRes *pBlob = drmModeGetPropertyBlob( g_DRM.fd, ulBlobId );
+			if ( !pBlob )
 			{
-				const drmModeModeInfo *pMode = &m_pConnector->modes[i];
-				if ( pMode->hdisplay != pPreferredMode->hdisplay || pMode->vdisplay != pPreferredMode->vdisplay )
-					continue;
-				if ( !Algorithm::Contains( m_Mutable.ValidDynamicRefreshRates, pMode->vrefresh ) )
-					m_Mutable.ValidDynamicRefreshRates.push_back( pMode->vrefresh );
+				drm_log.errorf_errno( "Failed to read EDID for connector: %s", m_Mutable.szName );
+				return nullptr;
 			}
-			std::sort( m_Mutable.ValidDynamicRefreshRates.begin(), m_Mutable.ValidDynamicRefreshRates.end() );
-			if ( m_Mutable.ValidDynamicRefreshRates.size() > 1 )
-				drm_log.infof( "Connector %s: no EDID, %zu refresh rates from the panel mode list",
-					m_Mutable.szName, m_Mutable.ValidDynamicRefreshRates.size() );
+			defer( drmModeFreePropertyBlob( pBlob ) );
+
+			const uint8_t *pDataPointer = reinterpret_cast<const uint8_t *>( pBlob->data );
+			m_Mutable.EdidData = std::vector<uint8_t>{ pDataPointer, pDataPointer + pBlob->length };
+
+			di_info *pInfo = di_info_parse_edid( m_Mutable.EdidData.data(), m_Mutable.EdidData.size() );
+			if ( !pInfo )
+				drm_log.errorf( "Failed to parse EDID for connector: %s", m_Mutable.szName );
+			return pInfo;
 		};
-
-		if ( !GetProperties().EDID )
+		di_info *pInfo = readEDID();
+		defer( if ( pInfo ) di_info_destroy( pInfo ); );
+		const di_edid *pEdid = pInfo ? di_info_get_edid( pInfo ) : nullptr;
+		uint16_t uProduct = 0;
+		if ( pEdid )
 		{
-			collectModeRefreshRates();
-			return;
-		}
+			const di_edid_vendor_product *pProduct = di_edid_get_vendor_product( pEdid );
+			uProduct = pProduct->product;
+			m_Mutable.szMakePNP[0] = pProduct->manufacturer[0];
+			m_Mutable.szMakePNP[1] = pProduct->manufacturer[1];
+			m_Mutable.szMakePNP[2] = pProduct->manufacturer[2];
+			m_Mutable.szMakePNP[3] = '\0';
 
-		uint64_t ulBlobId = GetProperties().EDID->GetCurrentValue();
-		if ( !ulBlobId )
-		{
-			collectModeRefreshRates();
-			return;
-		}
+			m_Mutable.pszMake = m_Mutable.szMakePNP;
+			auto pnpIter = pnps.find( m_Mutable.szMakePNP );
+			if ( pnpIter != pnps.end() )
+				m_Mutable.pszMake = pnpIter->second.c_str();
 
-		drmModePropertyBlobRes *pBlob = drmModeGetPropertyBlob( g_DRM.fd, ulBlobId );
-		if ( !pBlob )
-		{
-			collectModeRefreshRates();
-			return;
-		}
-		defer( drmModeFreePropertyBlob( pBlob ) );
-
-		const uint8_t *pDataPointer = reinterpret_cast<const uint8_t *>( pBlob->data );
-		m_Mutable.EdidData = std::vector<uint8_t>{ pDataPointer, pDataPointer + pBlob->length };
-
-		di_info *pInfo = di_info_parse_edid( m_Mutable.EdidData.data(), m_Mutable.EdidData.size() );
-		if ( !pInfo )
-		{
-			drm_log.errorf( "Failed to parse edid for connector: %s", m_Mutable.szName );
-			collectModeRefreshRates();
-			return;
-		}
-		defer( di_info_destroy( pInfo ) );
-
-		const di_edid *pEdid = di_info_get_edid( pInfo );
-
-		const di_edid_vendor_product *pProduct = di_edid_get_vendor_product( pEdid );
-		m_Mutable.szMakePNP[0] = pProduct->manufacturer[0];
-		m_Mutable.szMakePNP[1] = pProduct->manufacturer[1];
-		m_Mutable.szMakePNP[2] = pProduct->manufacturer[2];
-		m_Mutable.szMakePNP[3] = '\0';
-
-		m_Mutable.pszMake = m_Mutable.szMakePNP;
-		auto pnpIter = pnps.find( m_Mutable.szMakePNP );
-		if ( pnpIter != pnps.end() )
-			m_Mutable.pszMake = pnpIter->second.c_str();
-
-		const di_edid_display_descriptor *const *pDescriptors = di_edid_get_display_descriptors( pEdid );
-		for ( size_t i = 0; pDescriptors[i] != nullptr; i++ )
-		{
-			const di_edid_display_descriptor *pDesc = pDescriptors[i];
-			const di_edid_display_descriptor_tag eTag = di_edid_display_descriptor_get_tag( pDesc );
-			if ( eTag == DI_EDID_DISPLAY_DESCRIPTOR_PRODUCT_NAME )
+			const di_edid_display_descriptor *const *pDescriptors = di_edid_get_display_descriptors( pEdid );
+			for ( size_t i = 0; pDescriptors[i] != nullptr; i++ )
 			{
-				// Max length of di_edid_display_descriptor_get_string is 14
-				// m_szModel is 16 bytes.
-				const char *pszModel = di_edid_display_descriptor_get_string( pDesc );
-				strncpy( m_Mutable.szModel, pszModel, sizeof( m_Mutable.szModel ) );
-			}
-			else if ( eTag == DI_EDID_DISPLAY_DESCRIPTOR_DATA_STRING )
-			{
-				const char *pszDataString = di_edid_display_descriptor_get_string( pDesc );
-				strncpy( m_Mutable.szDataString, pszDataString, sizeof( m_Mutable.szDataString ) );
+				const di_edid_display_descriptor *pDesc = pDescriptors[i];
+				const di_edid_display_descriptor_tag eTag = di_edid_display_descriptor_get_tag( pDesc );
+				if ( eTag == DI_EDID_DISPLAY_DESCRIPTOR_PRODUCT_NAME )
+				{
+					// Max length of di_edid_display_descriptor_get_string is 14
+					// m_szModel is 16 bytes.
+					const char *pszModel = di_edid_display_descriptor_get_string( pDesc );
+					strncpy( m_Mutable.szModel, pszModel, sizeof( m_Mutable.szModel ) );
+				}
+				else if ( eTag == DI_EDID_DISPLAY_DESCRIPTOR_DATA_STRING )
+				{
+					const char *pszDataString = di_edid_display_descriptor_get_string( pDesc );
+					strncpy( m_Mutable.szDataString, pszDataString, sizeof( m_Mutable.szDataString ) );
+				}
 			}
 		}
 
@@ -3299,7 +3272,7 @@ namespace gamescope
 		{
 			CScriptScopedLock script;
 
-			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, m_Mutable.szMakePNP, pProduct->product, m_Mutable.szModel, m_Mutable.szDataString );
+			auto oKnownDisplay = script.Manager().Gamescope().Config.LookupDisplay( script, m_Mutable.szMakePNP, uProduct, m_Mutable.szModel, m_Mutable.szDataString, m_Mutable.szName );
 			if ( oKnownDisplay )
 			{
 				sol::table tTable = oKnownDisplay->second;
@@ -3398,9 +3371,9 @@ namespace gamescope
 					bHasKnownHDRInfo = true;
 				}
 			}
-			else
+			if ( !m_Mutable.fnDynamicModeGenerator )
 			{
-				// Unknown display, see if there are any other refresh rates in the EDID we can get.
+				// Without a mode generator, use only modes advertised by the kernel.
 				if ( GetScreenType() == GAMESCOPE_SCREEN_TYPE_INTERNAL || cv_drm_allow_dynamic_modes_for_external_display )
 				{
 					const drmModeModeInfo *pPreferredMode = find_mode( m_pConnector.get(), 0, 0, 0 );
@@ -3434,7 +3407,7 @@ namespace gamescope
 			// for each unit.
 			// Other external displays probably have this too.
 
-			const di_edid_chromaticity_coords *pChroma = di_edid_get_chromaticity_coords( pEdid );
+			const di_edid_chromaticity_coords *pChroma = pEdid ? di_edid_get_chromaticity_coords( pEdid ) : nullptr;
 			if ( pChroma && pChroma->red_x != 0.0f )
 			{
 				drm_log.infof( "[colorimetry]: EDID with colorimetry detected. Using it" );
@@ -3465,8 +3438,8 @@ namespace gamescope
 			const di_cta_colorimetry_block *pColorimetry = nullptr;
 
 			const di_edid_cta* pCTA = NULL;
-			const di_edid_ext *const *ppExts = di_edid_get_extensions( pEdid );
-			for ( ; *ppExts != nullptr; ppExts++ )
+			const di_edid_ext *const *ppExts = pEdid ? di_edid_get_extensions( pEdid ) : nullptr;
+			for ( ; ppExts && *ppExts != nullptr; ppExts++ )
 			{
 				if ( ( pCTA = di_edid_ext_get_cta( *ppExts ) ) )
 					break;

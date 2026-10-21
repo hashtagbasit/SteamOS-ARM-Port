@@ -39,6 +39,19 @@ BRIDGE = BEGIN + """((remote) => {
   }
   return remote.RegisterForSettingsChanges.bind(remote);
 })(SteamClient.RemotePlay)""" + END
+HDR_LAUNCHER = Path("/usr/lib/steamos/sm8550-streaming-client")
+
+
+def launcher_source(root, hdr=False):
+    command = (f'{HDR_LAUNCHER} "$S"' if hdr else
+               'box64 "$S/steamrt64/streaming_client"')
+    return f"""#!/bin/sh
+# PYROWAVE_BOX64_WRAPPER (written by RUNSTEAM.sh; remove {root}/.pyrowave-box64 to undo)
+S='{root}'
+exec env BOX64_EMULATED_LIBS=libSDL3_ttf.so.0 \\
+  BOX64_LD_LIBRARY_PATH="$S/steamrt64:$S/ubuntu12_64:$S/linux64" \\
+  {command} "$@" >"$S/logs/streaming_client_box64.log" 2>&1
+"""
 
 
 def uses_box64_client(root, runtime):
@@ -50,15 +63,11 @@ def uses_box64_client(root, runtime):
         return False
     with wrapper.open("rb") as stream:
         contents = stream.read(4097)
-    # A custom launcher could select a different renderer or VA-API driver.
-    expected = f"""#!/bin/sh
-# PYROWAVE_BOX64_WRAPPER (written by RUNSTEAM.sh; remove {root}/.pyrowave-box64 to undo)
-S='{root}'
-exec env BOX64_EMULATED_LIBS=libSDL3_ttf.so.0 \\
-  BOX64_LD_LIBRARY_PATH="$S/steamrt64:$S/ubuntu12_64:$S/linux64" \\
-  box64 "$S/steamrt64/streaming_client" "$@" >"$S/logs/streaming_client_box64.log" 2>&1
-"""
-    if contents != expected.encode():
+    # Only the stock launcher and our guarded SDL launcher use this VA-API path.
+    known = [launcher_source(root).encode()]
+    if os.access(HDR_LAUNCHER, os.X_OK):
+        known.append(launcher_source(root, hdr=True).encode())
+    if contents not in known:
         return False
     with client.open("rb") as stream:
         header = stream.read(20)
@@ -73,7 +82,7 @@ class VAConfigAttrib(ctypes.Structure):
     _fields_ = [("type", ctypes.c_int), ("value", ctypes.c_uint)]
 
 
-def probe_av1(device):
+def probe_av1(device, rt_format=1):
     va = ctypes.CDLL("libva.so.2")
     drm = ctypes.CDLL("libva-drm.so.2")
     pointer = ctypes.c_void_p
@@ -110,9 +119,9 @@ def probe_av1(device):
         check(va.vaInitialize(display, ctypes.byref(major), ctypes.byref(minor)),
               "vaInitialize")
         try:
-            # AV1 Profile 0, VLD, 8-bit YUV420. No HDR/P010 capability is inferred.
+            # AV1 Profile 0, VLD. The UI probe defaults to 8-bit YUV420.
             config = ctypes.c_uint()
-            attribute = VAConfigAttrib(0, 1)
+            attribute = VAConfigAttrib(0, rt_format)
             check(va.vaCreateConfig(display, 32, 1, ctypes.byref(attribute), 1,
                                     ctypes.byref(config)), "AV1 vaCreateConfig")
             check(va.vaDestroyConfig(display, config), "vaDestroyConfig")
@@ -165,6 +174,11 @@ def main(root, runtime):
         raise RuntimeError("AV1 probe requires one unambiguous DRM render device")
     probe_av1(devices[0])
     updated = adapt_source(clean, True)
+    if os.access(HDR_LAUNCHER, os.X_OK):
+        wrapper = root / runtime / "streaming_client"
+        launcher = launcher_source(root, hdr=True)
+        if wrapper.read_text() != launcher:
+            replace_source(wrapper, launcher)
     replace_source(path, updated)
     print("SteamOS ARM: AV1 VA-API config supported; Box64 capability bridge enabled")
 

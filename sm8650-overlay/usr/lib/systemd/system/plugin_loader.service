@@ -33,7 +33,9 @@ CacheDirectory=decky-box64
 # (PyLzma_Malloc) as ARM code: SIGILL. tarfile's "r:*" tries xz first, so
 # any archive read kills the plugin (decky-lsfg-vk Install did nothing) and
 # the loader then spins a core on the dead backend. Emulate liblzma instead.
-Environment=BOX64_EMULATED_LIBS=liblzma.so.5
+# Newer Decky builds bundle Python 3.14 + OpenSSL 3.4 + Zstd with symbols
+# missing from Box64's native wrappers, so emulate libssl, libcrypto, and libzstd too.
+Environment=BOX64_EMULATED_LIBS=liblzma.so.5:libssl.so.3:libcrypto.so.3:libzstd.so.1
 # Updating Decky from its settings would replace this unit with Decky's own,
 # which has none of the above; this tells the updater to keep ours.
 Environment=KEEP_SYSTEMD_SERVICE=1

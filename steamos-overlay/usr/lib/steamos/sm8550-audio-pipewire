@@ -13,6 +13,40 @@ export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 if grep -qaE "REDMAGIC 6" /sys/firmware/devicetree/base/model 2>/dev/null; then
   exit 0
 fi
+# Retroid Pocket 5 / Flip 2 / Mini / Mini V2 (SM8250): UCM HiFi, not the
+# Odin 2 policy below. HiFi is switched to once PipeWire is up; asking for it
+# at start-up wedges PipeWire.
+if tr '\0' '\n' </sys/firmware/devicetree/base/compatible 2>/dev/null | grep -q '^retroidpocket,'; then
+  SINK=alsa_output.platform-sound.HiFi__Speaker__sink
+  dev=
+  for _ in $(seq 1 60); do
+    dev="$(timeout 8 wpctl status 2>/dev/null | awk '/Devices:/ {f=1; next} f && /Built-in Audio/ {gsub(/[^0-9]/, "", $2); print $2; exit} /Sinks:/ {f=0}')"
+    [[ -n "$dev" ]] && break
+    sleep 1
+  done
+  [[ -n "$dev" ]] || exit 1
+  timeout 8 wpctl set-profile "$dev" 1 || exit 1
+  for _ in $(seq 1 30); do
+    timeout 8 wpctl status 2>/dev/null | grep -q 'Speakers' && break
+    sleep 1
+  done
+  # WirePlumber picks no default sink here; prefer plugged-in headphones.
+  if amixer -c RetroidPocket cget iface=CARD,name='Headphone Jack' 2>/dev/null | grep -q ': values=on'; then
+    SINK=alsa_output.platform-sound.HiFi__Headphones__sink
+  fi
+  timeout 8 pw-metadata -n default 0 default.audio.sink "{\"name\":\"${SINK}\"}" Spa:String:JSON >/dev/null || exit 1
+  # The route starts near full scale: set a moderate volume once.
+  mark="${XDG_STATE_HOME:-$HOME/.local/state}/sm8550-audio-first-volume"
+  if [[ ! -e "$mark" ]]; then
+    timeout 8 wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.30 \
+      && { mkdir -p "${mark%/*}"; : >"$mark"; }
+  fi
+  # The UCM opens the speaker amp at step 12 (+18 dB).
+  for c in "SpkrLeft PA Volume" "SpkrRight PA Volume"; do
+    amixer -c RetroidPocket cset name="$c" 6 >/dev/null 2>&1
+  done
+  exit 0
+fi
 # The Pocket FIT and Pocket S2 route everything through their UCM HiFi
 # profiles (speaker, headphones, DisplayPort), with no vendor I2S path: just
 # switch between their own profiles, no mixers and no pro-audio. WirePlumber

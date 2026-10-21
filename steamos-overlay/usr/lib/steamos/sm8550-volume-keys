@@ -34,7 +34,7 @@ HOLD_INTERVAL = float(os.environ.get("SM8550_VOLUME_HOLD_INTERVAL", "0.1"))
 # InputPlumber's keyboard too: on the RP6 it grabs gpio-keys for the back
 # paddles, so Volume Up only comes through its keyboard (a grabbed device's
 # raw events reach nobody else, so nothing is counted twice).
-ALLOW = ("gpio-keys", "pmic_resin", "inputplumber keyboard")
+ALLOW = ("gpio-keys", "pmic_resin", "pm8941_resin", "inputplumber keyboard")  # SM8550 / SM8250
 # The AYANEO Pocket DMG's volume wheel: the mouse interface of "AYANEO DEVICE",
 # a scroll wheel (InputPlumber leaves that interface alone on the DMG).
 WHEEL = ("ayaneo device",)

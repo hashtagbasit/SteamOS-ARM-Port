@@ -19,11 +19,10 @@
 # like a new Steam Deck (login screen, no host account).
 set -euo pipefail
 
-STEAM_HOME="${1:?STEAM_HOME}"
 HERE="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "${HERE}/.." && pwd)"
 CHANNEL="${STEAM_ARM_CHANNEL:-steamdeck_publicbeta}"
-SEED="${STEAM_ARM_SEED:-/home/steam/.local/share/Steam}"
+SEED="${STEAM_ARM_SEED:-${STEAMOS_WORK:-${ROOT}/sm8750-work}/steam-arm-seed}"
 UBUNTU_ARM="${STEAM_ARM_SCRIPT:-/home/steam/Desktop/SteamOS-Ubuntu/vendor/SteamARM/install-steam-arm}"
 
 log() { printf '==> [steam-complete] %s\n' "$*"; }
@@ -94,6 +93,18 @@ sanitize_steam_user_data() {
   fi
 }
 
+if [[ "${1:-}" == "--check" ]]; then
+  is_complete "${2:?Usage: $0 --check <DIR>}"
+  exit $?
+fi
+
+if [[ "${1:-}" == "--sanitize" ]]; then
+  sanitize_steam_user_data "${2:?Usage: $0 --sanitize <DIR>}"
+  touch "${2}/.install-complete" "${2}/.odin-complete-client"
+  exit 0
+fi
+
+STEAM_HOME="${1:?STEAM_HOME}"
 mkdir -p "$STEAM_HOME"
 
 if is_complete "$STEAM_HOME"; then
@@ -135,6 +146,12 @@ if [[ -n "${SEED}" && -d "${SEED}" && "$SEED" != /dev/null ]] && is_complete "$S
 fi
 
 if [[ ! -x "$UBUNTU_ARM" ]]; then
+  ROOTFS="${STEAMOS_ROOTFS:-${STEAMOS_WORK:-${ROOT}/sm8750-work}/rootfs}"
+  if [[ "$(uname -m)" == "aarch64" && -d "$ROOTFS" && -f "$ROOTFS/usr/lib/steam/steam.tar.zst" ]]; then
+    log "No seed found, bootstrapping complete client headlessly from rootfs..."
+    "${HERE}/bootstrap-steam-arm-seed.sh" "$ROOTFS" "$STEAM_HOME" "$CHANNEL"
+    exit 0
+  fi
   log "ERROR: no complete seed and missing $UBUNTU_ARM"
   exit 1
 fi

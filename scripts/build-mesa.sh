@@ -12,13 +12,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+[[ -f "${ROOT}/versions.env" ]] && source "${ROOT}/versions.env"
 R="$(cd "${1:?frame rootfs}" && pwd)"
 shift
 ARCHES=("${@:-aarch64 x86_64 i386}")
 read -ra ARCHES <<<"${ARCHES[*]}"
 
-MESA_VERSION=26.2.3
-MESA_SHA256=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f
+: "${MESA_VERSION:?MESA_VERSION must be defined in versions.env or environment}"
+: "${MESA_SHA256:?MESA_SHA256 must be defined in versions.env or environment}"
 W="${MESA_WORK:-/work/mesa}"
 G="$R/usr/share/guestos/fex-mesa"
 PATCHES="${ROOT}/external-and-mods/mesa/patches"
@@ -134,6 +135,7 @@ make_sysroot() {
     local stubs
     stubs="$(find /usr/i686-linux-gnu/include/gnu -name stubs-32.h 2>/dev/null | head -1)"
     [[ -n "$stubs" ]] || die "stubs-32.h not found (apt install libc6-dev-i386-cross)"
+    mkdir -p "$s/usr/include/gnu"
     cp "$stubs" "$s/usr/include/gnu/stubs-32.h"
   fi
   cp -a "$G/usr/share/pkgconfig/." "$s/usr/share/pkgconfig/"
@@ -202,8 +204,8 @@ EOF2
 # only, so this uses the host's clang 18 with the r27c (clang 18) sysroot and
 # runtime (the NDK's clang defaults: compiler-rt, libunwind, libc++, lld).
 # Files land where Valve's do: usr/share/guestos/android/vendor/lib64.
-NDK_VERSION=r27c
-NDK_SHA1=090e8083a715fdb1a3e402d0763c388abb03fb4e
+: "${NDK_VERSION:?NDK_VERSION must be defined in versions.env or environment}"
+: "${NDK_SHA1:?NDK_SHA1 must be defined in versions.env or environment}"
 ANDROID_API=30
 build_android() {
   local zip="$W/cache/android-ndk-${NDK_VERSION}-linux.zip" ndk="$W/android-ndk-${NDK_VERSION}"

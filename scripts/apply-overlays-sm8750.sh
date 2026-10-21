@@ -154,6 +154,8 @@ install_file "$OVL/usr/lib/steamos/gamescope-onready" \
   "$R/usr/lib/steamos/gamescope-onready" 0755
 install_file "$OVL/usr/lib/steamos/sm8550-steam-focus" \
   "$R/usr/lib/steamos/sm8550-steam-focus" 0755
+install_file "$OVL/usr/lib/steamos/sm8550-steam-av1" \
+  "$R/usr/lib/steamos/sm8550-steam-av1" 0755
 # Game Mode: bring a game back when Quick Access / the Steam menu closes
 # (games that minimise themselves came back black or frozen).
 install_file "${ROOT}/sm8650-overlay/usr/lib/konkr/konkr-focusfix" "$R/usr/lib/konkr/konkr-focusfix" 0755

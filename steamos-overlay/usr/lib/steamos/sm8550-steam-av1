@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Report the configured Box64 client's AV1 capability to Steam's shared UI.
+
+ARM Steam's local codec check only probes H.264/HEVC. This adapter requires
+the existing compatibility launcher and an actual 8-bit AV1 VA-API config;
+it does not add native ARM decoding or change remote clients' capabilities.
+"""
+
+import ctypes
+import mmap
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+
+
+CALL = "SteamClient.RemotePlay.RegisterForSettingsChanges"
+BEGIN = "/* steamos-arm-av1-begin */"
+END = "/* steamos-arm-av1-end */"
+BRIDGE = BEGIN + """((remote) => {
+  if (!remote.RegisterForSettingsChanges.steamosArmAV1) {
+    const original = remote.RegisterForSettingsChanges;
+    const subscribe = function (callback) {
+      return original.call(remote, (settings) => callback(
+        settings && settings.unStreamingSessionID === 0 &&
+        settings.bAV1DecodeAvailable === false
+          ? {...settings, bAV1DecodeAvailable: true}
+          : settings
+      ));
+    };
+    Object.defineProperty(subscribe, "steamosArmAV1", {value: true});
+    if (Reflect.set(remote, "RegisterForSettingsChanges", subscribe)) {
+      console.info("SteamOS ARM: AV1 capability uses the probed Box64 VA-API path");
+    } else {
+      console.error("SteamOS ARM: cannot adapt Steam's codec capability subscription");
+    }
+  }
+  return remote.RegisterForSettingsChanges.bind(remote);
+})(SteamClient.RemotePlay)""" + END
+
+
+def uses_box64_client(root, runtime):
+    if not (root / ".pyrowave-box64").exists() or not shutil.which("box64"):
+        return False
+    wrapper = root / runtime / "streaming_client"
+    client = root / "steamrt64/streaming_client"
+    if not os.access(wrapper, os.X_OK) or not os.access(client, os.X_OK):
+        return False
+    with wrapper.open("rb") as stream:
+        contents = stream.read(4097)
+    # A custom launcher could select a different renderer or VA-API driver.
+    expected = f"""#!/bin/sh
+# PYROWAVE_BOX64_WRAPPER (written by RUNSTEAM.sh; remove {root}/.pyrowave-box64 to undo)
+S='{root}'
+exec env BOX64_EMULATED_LIBS=libSDL3_ttf.so.0 \\
+  BOX64_LD_LIBRARY_PATH="$S/steamrt64:$S/ubuntu12_64:$S/linux64" \\
+  box64 "$S/steamrt64/streaming_client" "$@" >"$S/logs/streaming_client_box64.log" 2>&1
+"""
+    if contents != expected.encode():
+        return False
+    with client.open("rb") as stream:
+        header = stream.read(20)
+        if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
+            return False
+        with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as binary:
+            return (binary.find(b"--enable-av1\0") >= 0 and
+                    binary.find(b"CVAAPIGamescopeAccel:") >= 0)
+
+
+class VAConfigAttrib(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("value", ctypes.c_uint)]
+
+
+def probe_av1(device):
+    va = ctypes.CDLL("libva.so.2")
+    drm = ctypes.CDLL("libva-drm.so.2")
+    pointer = ctypes.c_void_p
+    uint_pointer = ctypes.POINTER(ctypes.c_uint)
+    signatures = {
+        "vaInitialize": [pointer, ctypes.POINTER(ctypes.c_int),
+                         ctypes.POINTER(ctypes.c_int)],
+        "vaCreateConfig": [pointer, ctypes.c_int, ctypes.c_int,
+                           ctypes.POINTER(VAConfigAttrib), ctypes.c_int,
+                           uint_pointer],
+        "vaDestroyConfig": [pointer, ctypes.c_uint],
+        "vaTerminate": [pointer],
+    }
+    for name, arguments in signatures.items():
+        function = getattr(va, name)
+        function.argtypes = arguments
+        function.restype = ctypes.c_int
+    va.vaErrorStr.argtypes = [ctypes.c_int]
+    va.vaErrorStr.restype = ctypes.c_char_p
+    drm.vaGetDisplayDRM.argtypes = [ctypes.c_int]
+    drm.vaGetDisplayDRM.restype = pointer
+
+    def check(status, operation):
+        if status:
+            reason = va.vaErrorStr(status).decode()
+            raise RuntimeError(f"{operation}: {reason}")
+
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        display = drm.vaGetDisplayDRM(fd)
+        if not display:
+            raise RuntimeError(f"No VA-API display for {device}")
+        major, minor = ctypes.c_int(), ctypes.c_int()
+        check(va.vaInitialize(display, ctypes.byref(major), ctypes.byref(minor)),
+              "vaInitialize")
+        try:
+            # AV1 Profile 0, VLD, 8-bit YUV420. No HDR/P010 capability is inferred.
+            config = ctypes.c_uint()
+            attribute = VAConfigAttrib(0, 1)
+            check(va.vaCreateConfig(display, 32, 1, ctypes.byref(attribute), 1,
+                                    ctypes.byref(config)), "AV1 vaCreateConfig")
+            check(va.vaDestroyConfig(display, config), "vaDestroyConfig")
+        finally:
+            check(va.vaTerminate(display), "vaTerminate")
+    finally:
+        os.close(fd)
+
+
+def adapt_source(source, available):
+    clean = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END), CALL,
+                   source, flags=re.DOTALL)
+    if BEGIN in clean or END in clean:
+        raise ValueError("Incomplete AV1 bridge markers; refusing to edit Steam UI")
+    if not available:
+        return clean
+    if clean.count(CALL + "(") != 1:
+        raise ValueError("Expected one Remote Play settings subscription in sp.js")
+    return clean.replace(CALL + "(", BRIDGE + "(", 1)
+
+
+def replace_source(path, source):
+    mode = path.stat().st_mode & 0o777
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(source)
+        temporary.chmod(mode)
+        temporary.replace(path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def main(root, runtime):
+    path = root / "steamui/sp.js"
+    if not path.is_file():
+        raise FileNotFoundError(f"Steam shared UI is missing: {path}")
+    original = path.read_text(encoding="utf-8")
+    clean = adapt_source(original, False)
+    if clean != original:
+        replace_source(path, clean)
+    if not uses_box64_client(root, runtime):
+        print("SteamOS ARM: native/unknown streaming client; no AV1 bridge")
+        return
+    devices = sorted(Path("/dev/dri").glob("renderD*"))
+    if len(devices) != 1:
+        raise RuntimeError("AV1 probe requires one unambiguous DRM render device")
+    probe_av1(devices[0])
+    updated = adapt_source(clean, True)
+    replace_source(path, updated)
+    print("SteamOS ARM: AV1 VA-API config supported; Box64 capability bridge enabled")
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) != 3 or sys.argv[2] not in ("steamrtarm64", "linuxarm64"):
+            raise ValueError("usage: sm8550-steam-av1 <Steam root> <ARM runtime>")
+        main(Path(sys.argv[1]).resolve(), sys.argv[2])
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"SteamOS ARM: AV1 capability bridge unavailable: {error}",
+              file=sys.stderr)
+        sys.exit(1)

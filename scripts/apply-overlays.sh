@@ -461,6 +461,8 @@ done
 unset _sp
 install_file "$OVL/usr/lib/steamos/sm8550-patch-steamui" \
   "$R/usr/lib/steamos/sm8550-patch-steamui" 0755
+install_file "$OVL/usr/lib/steamos/sm8550-steam-av1" \
+  "$R/usr/lib/steamos/sm8550-steam-av1" 0755
 install_file "$OVL/usr/lib/steamos/sm8550-bluetooth-setup" \
   "$R/usr/lib/steamos/sm8550-bluetooth-setup" 0755
 install_file "$OVL/usr/lib/systemd/system/sm8550-bluetooth-setup.service" \

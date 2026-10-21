@@ -219,6 +219,11 @@ elif [[ -f "${_sc}.arm64" ]] && ! _sc_is_elf "${_sc}"; then
   mv -f "${_sc}.arm64" "${_sc}" 2>/dev/null || true
 fi
 unset _sc _sc_x86
+if [[ -f /usr/lib/steamos/sm8550-steam-av1 ]]; then
+  if ! timeout --kill-after=1s 5s python3 /usr/lib/steamos/sm8550-steam-av1 "${STEAMROOT}" "${STEAM_RT_ARM64}"; then
+    echo "RUNSTEAM: keeping Steam's native codec availability" >&2
+  fi
+fi
 echo "RUNSTEAM: DISPLAY=${DISPLAY} GAMESCOPE_WAYLAND_DISPLAY=${GAMESCOPE_WAYLAND_DISPLAY} QT_QPA_PLATFORM=${QT_QPA_PLATFORM}"
 
 if [[ "$is_odin3" -eq 1 && -f /etc/sdl2/qcom-gamecontrollerdb.txt ]]; then

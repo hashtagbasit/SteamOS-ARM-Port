@@ -18,3 +18,7 @@ ACTION=="bind", SUBSYSTEM=="soundwire", KERNEL=="sdw:*:0217:010d:*", ATTR{power/
 # powerdown, it never finishes SoundWire enumeration and the card fails
 # (-110). Keep both up from bind. Harmless on the boards with separate lines.
 ACTION=="bind", SUBSYSTEM=="soundwire", KERNEL=="sdw:*:0217:2010:*", ATTR{power/control}="on"
+
+# MANGMI Pocket Max: the audio codec's runtime suspend pops in the headphones.
+# Keep it powered (from ArmadaOS 992a4ec / 678333b).
+ACTION=="bind", SUBSYSTEM=="platform", KERNEL=="audio-codec", PROGRAM="/usr/bin/grep -q 'MANGMI Pocket Max' /sys/firmware/devicetree/base/model", ATTR{power/control}="on"

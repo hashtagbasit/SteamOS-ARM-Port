@@ -1,0 +1,3 @@
+# SM8250 PMIC power key, for steamos-powerbuttond
+evdev:name:pm8941_pwrkey:*
+ STEAMOS_POWER_BUTTON=1

@@ -37,6 +37,7 @@ import time
 FLAG = "/run/konkr-standby"
 EV = struct.Struct("llHHi")
 EV_KEY, KEY_POWER = 1, 116
+EV_SW, SW_LID = 5, 0
 
 
 def rd(p: str, d: str = "") -> str:
@@ -143,7 +144,14 @@ def game_pids() -> list[int]:
 
 def power_key_fd() -> int | None:
     for e in glob.glob("/sys/class/input/event*"):
-        if rd(f"{e}/device/name") == "pmic_pwrkey":
+        if rd(f"{e}/device/name") in ("pmic_pwrkey", "pm8941_pwrkey"):  # SM8650 / SM8250
+            return os.open(f"/dev/input/{os.path.basename(e)}", os.O_RDONLY)
+    return None
+
+
+def lid_fd() -> int | None:
+    for e in glob.glob("/sys/class/input/event*"):
+        if rd(f"{e}/device/name") == "gpio-keys-lid":
             return os.open(f"/dev/input/{os.path.basename(e)}", os.O_RDONLY)
     return None
 
@@ -270,15 +278,23 @@ def set_frozen(cgroups: list[str], frozen: bool) -> list[str]:
 WAKE_R, WAKE_W = os.pipe()
 
 
-def wait_power_press(fd: int) -> None:
-    """Block until a full press+release of the power key, or SIGUSR1."""
+def wait_power_press(fd: int, lid: int | None = None) -> None:
+    """Block until a full press+release of the power key, the lid opens, or SIGUSR1."""
     pressed = False
+    watch = [fd, WAKE_R] + ([lid] if lid is not None else [])
     while True:
-        r, _, _ = select.select([fd, WAKE_R], [], [])
+        r, _, _ = select.select(watch, [], [])
         if WAKE_R in r:
             log("wake requested (SIGUSR1)")
             return
-        data = os.read(fd, EV.size * 64)
+        if lid is not None and lid in r:
+            data = os.read(lid, EV.size * 64)
+            for off in range(0, len(data) - EV.size + 1, EV.size):
+                _s, _u, t, code, val = EV.unpack_from(data, off)
+                if t == EV_SW and code == SW_LID and val == 0:
+                    log("wake: lid opened")
+                    return
+        data = os.read(fd, EV.size * 64) if fd in r else b""
         for off in range(0, len(data) - EV.size + 1, EV.size):
             _s, _u, t, code, val = EV.unpack_from(data, off)
             if t == EV_KEY and code == KEY_POWER:
@@ -294,6 +310,7 @@ def main() -> int:
     if fd is None:
         log("no power key device; not entering standby")
         return 1
+    lid = lid_fd()
     open(FLAG, "w").close()
     saved: dict[str, str] = {}
     paused: list[int] = []
@@ -353,7 +370,7 @@ def main() -> int:
         log(f"standby: paused {len(paused)} game processes, {how}, "
             f"cpus {offlined} offline, screen off")
         t0, b0, irq0 = time.monotonic(), battery_now(), interrupts()
-        wait_power_press(fd)
+        wait_power_press(fd, lid)
         log("wake")
         try:
             standby_report(t0, b0, irq0)
@@ -386,6 +403,8 @@ def main() -> int:
         except OSError:
             pass
         os.close(fd)
+        if lid is not None:
+            os.close(lid)
         # konkrd re-applies profile clocks/LEDs on SIGHUP
         os.system("systemctl kill -s HUP konkrd.service >/dev/null 2>&1")
     return 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hardware video decode for VA-API apps (Chromium/Electron, FFmpeg, mpv):
 # msm_drv_video.so drives the video core (iris, venus) through V4L2;
-# libgbm.so.1 adds the NV12 buffers Mesa's GBM can't make on Adreno. The hub
+# libgbm.so.1 adds NV12/P010 buffers Mesa's GBM can't make on Adreno. The hub
 # copies both into a Flatpak's data folder when it starts one.
 #   install-v4l2-vaapi.sh <rootfs>     (build: scripts/build-v4l2-vaapi.sh)
 set -euo pipefail

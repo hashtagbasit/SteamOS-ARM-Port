@@ -25,6 +25,7 @@
 #include <va/va_backend.h>
 #include <va/va_dec_av1.h>
 #include <va/va_drmcommon.h>
+#include "../formats.h"
 
 #define MAX_PROFILES 5
 #define MAX_SLOTS 32
@@ -44,6 +45,7 @@ struct drv {
 	int render_fd;               /* our own render node, never the client's */
 	char dec_path[32];           /* /dev/videoN of the decoder */
 	int av1;                     /* the decoder takes AV1 too */
+	int p010;                    /* linear 10-bit capture is available */
 	struct obj_table tab[O_MAX];
 	int debug;
 	FILE *log;
@@ -54,6 +56,7 @@ struct drv {
 struct config {
 	VAProfile profile;
 	VAEntrypoint entrypoint;
+	uint32_t rt_format;
 };
 
 struct context;
@@ -67,6 +70,7 @@ struct av1_ref {
 
 struct surface {
 	uint32_t width, height;      /* as created */
+	uint32_t fourcc;
 	uint32_t pitch;              /* luma and chroma row pitch */
 	uint32_t uv_offset;
 	uint32_t size;
@@ -106,6 +110,7 @@ struct context {
 	int decode_order;            /* firmware returns pictures in decode order */
 	int late_output;             /* pictures come back a frame late: don't wait for them */
 	uint32_t cap_pitch, cap_height, cap_size, cap_count;
+	uint32_t cap_fourcc;
 	void *cap_map[MAX_SLOTS];
 	struct surface *slot_owner[MAX_SLOTS];
 	unsigned next_slot;
@@ -190,6 +195,7 @@ int av1_finish_refs(struct context *c);
 
 /* dec.c */
 int dec_has_av1(const char *path);
+int dec_has_p010(const char *path);
 int dec_find(char *path, size_t len);
 int dec_open(struct context *c);
 void dec_close(struct context *c);

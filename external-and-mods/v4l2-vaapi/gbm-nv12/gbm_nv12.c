@@ -1,5 +1,5 @@
 /*
- * libgbm-nv12: NV12 buffers for GBM clients on Adreno.
+ * libgbm-nv12: linear NV12 and P010 buffers for GBM clients on Adreno.
  *
  * Mesa's freedreno GBM can't create NV12 (gbm_device_is_format_supported
  * says no and every create fails), but Chromium's VA-API decoder allocates
@@ -8,8 +8,9 @@
  * the real GBM, tall enough for both planes, laid out the way the Snapdragon
  * video cores write NV12 (pitch a multiple of 128, chroma at pitch times
  * the height rounded up to 32). The decoder can then write into those
- * frames directly and the GPU samples them as an NV12 dma-buf. Every other
- * format and every non-NV12 buffer goes to the real libgbm untouched.
+ * frames directly and the GPU samples them as an NV12 dma-buf.
+ * P010 uses the same layout with two bytes per sample and a 256-byte stride
+ * alignment. Every other format goes to the real libgbm untouched.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -21,11 +22,13 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include "../formats.h"
 
 #define EXPORT __attribute__((visibility("default")))
 #define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
 #define FOURCC(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
 #define FMT_NV12 FOURCC('N', 'V', '1', '2')
+#define FMT_P010 FOURCC('P', '0', '1', '0')
 #define FMT_R8 FOURCC('R', '8', ' ', ' ')
 #define MOD_LINEAR 0ULL
 #define MOD_INVALID 0x00ffffffffffffffULL
@@ -55,7 +58,7 @@ struct nv12 {
 	struct gbm_bo *real;         /* R8 backing buffer, or NULL when imported */
 	int fd;                      /* imported dma-buf */
 	uint32_t handle;             /* GEM handle of an import */
-	uint32_t width, height, pitch, uv_offset;
+	uint32_t width, height, pitch, uv_offset, format;
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -171,15 +174,18 @@ static int linear_ok(const uint64_t *mods, unsigned count)
 	return 0;
 }
 
-static struct gbm_bo *nv12_create(struct gbm_device *dev, uint32_t w, uint32_t h, uint32_t flags)
+static struct gbm_bo *video_create(struct gbm_device *dev, uint32_t w, uint32_t h,
+				   uint32_t format, uint32_t flags)
 {
 	load_gbm_bo_create();
 	load_gbm_bo_get_stride();
 	if (!real_gbm_bo_create || !w || !h)
 		return NULL;
-	uint32_t pitch_want = ALIGN(w, 128);
-	uint32_t y_rows = ALIGN(h, 32), uv_rows = ALIGN((h + 1) / 2, 16);
-	uint32_t size = ALIGN(pitch_want * (y_rows + uv_rows), 4096);
+	uint32_t pitch_want, uv, size;
+	if (video_layout(format, w, h, &pitch_want, &uv, &size)) {
+		errno = EINVAL;
+		return NULL;
+	}
 	uint32_t rows = (size + pitch_want - 1) / pitch_want;
 
 	struct nv12 *n = calloc(1, sizeof(*n));
@@ -187,7 +193,7 @@ static struct gbm_bo *nv12_create(struct gbm_device *dev, uint32_t w, uint32_t h
 		return NULL;
 	/* Only the flags Mesa knows (scanout, cursor, rendering, write, linear). */
 	n->real = real_gbm_bo_create(dev, pitch_want, rows, FMT_R8, (flags & 0x1f) | USE_LINEAR);
-	dbg("NV12 %ux%u flags %#x -> R8 %ux%u %s", w, h, flags, pitch_want, rows,
+	dbg("format %#x %ux%u flags %#x -> R8 %ux%u %s", format, w, h, flags, pitch_want, rows,
 	    n->real ? "ok" : "FAILED");
 	if (!n->real) {
 		free(n);
@@ -197,16 +203,17 @@ static struct gbm_bo *nv12_create(struct gbm_device *dev, uint32_t w, uint32_t h
 	n->fd = -1;
 	n->width = w;
 	n->height = h;
+	n->format = format;
 	n->pitch = real_gbm_bo_get_stride(n->real);
-	n->uv_offset = n->pitch * y_rows;
+	n->uv_offset = n->pitch * (uv / pitch_want);
 	add(n);
 	return (struct gbm_bo *)n;
 }
 
 EXPORT int gbm_device_is_format_supported(struct gbm_device *dev, uint32_t format, uint32_t usage)
 {
-	if (format == FMT_NV12) {
-		dbg("is NV12 supported (usage %#x): yes", usage);
+	if (video_sample_bytes(format)) {
+		dbg("format %#x supported (usage %#x): yes", format, usage);
 		return 1;
 	}
 	load_gbm_device_is_format_supported();
@@ -217,8 +224,8 @@ EXPORT int gbm_device_is_format_supported(struct gbm_device *dev, uint32_t forma
 EXPORT struct gbm_bo *gbm_bo_create(struct gbm_device *dev, uint32_t w, uint32_t h,
 				    uint32_t format, uint32_t flags)
 {
-	if (format == FMT_NV12)
-		return nv12_create(dev, w, h, flags);
+	if (video_sample_bytes(format))
+		return video_create(dev, w, h, format, flags);
 	load_gbm_bo_create();
 	return real_gbm_bo_create(dev, w, h, format, flags);
 }
@@ -227,10 +234,10 @@ EXPORT struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *dev, uint3
 						   uint32_t format, const uint64_t *mods,
 						   const unsigned int count)
 {
-	if (format == FMT_NV12) {
-		dbg("NV12 with %u modifiers (first %#llx)%s", count,
+	if (video_sample_bytes(format)) {
+		dbg("format %#x with %u modifiers (first %#llx)%s", format, count,
 		    count ? (unsigned long long)mods[0] : 0ULL, linear_ok(mods, count) ? "" : " - no linear");
-		return linear_ok(mods, count) ? nv12_create(dev, w, h, 0) : NULL;
+		return linear_ok(mods, count) ? video_create(dev, w, h, format, 0) : NULL;
 	}
 	load_gbm_bo_create_with_modifiers();
 	return real_gbm_bo_create_with_modifiers(dev, w, h, format, mods, count);
@@ -240,9 +247,9 @@ EXPORT struct gbm_bo *gbm_bo_create_with_modifiers2(struct gbm_device *dev, uint
 						    uint32_t format, const uint64_t *mods,
 						    const unsigned int count, uint32_t flags)
 {
-	if (format == FMT_NV12) {
-		dbg("NV12 with %u modifiers2 flags %#x", count, flags);
-		return linear_ok(mods, count) ? nv12_create(dev, w, h, flags) : NULL;
+	if (video_sample_bytes(format)) {
+		dbg("format %#x with %u modifiers2 flags %#x", format, count, flags);
+		return linear_ok(mods, count) ? video_create(dev, w, h, format, flags) : NULL;
 	}
 	load_gbm_bo_create_with_modifiers2();
 	return real_gbm_bo_create_with_modifiers2(dev, w, h, format, mods, count, flags);
@@ -256,12 +263,18 @@ EXPORT struct gbm_bo *gbm_bo_import(struct gbm_device *dev, uint32_t type, void 
 {
 	if (type == IMPORT_FD_MODIFIER) {
 		struct gbm_import_fd_modifier_data *d = buffer;
-		if (d->format == FMT_NV12) {
-			dbg("import NV12 %ux%u fds %u stride %d/%d off %d/%d mod %#llx", d->width, d->height,
+		if (video_sample_bytes(d->format)) {
+			dbg("import format %#x %ux%u fds %u stride %d/%d off %d/%d mod %#llx", d->format, d->width, d->height,
 			    d->num_fds, d->strides[0], d->strides[1], d->offsets[0], d->offsets[1],
 			    (unsigned long long)d->modifier);
+			unsigned bytes = video_sample_bytes(d->format);
 			if ((d->modifier != MOD_LINEAR && d->modifier != MOD_INVALID) ||
-			    d->num_fds < 1 || d->strides[0] != d->strides[1] ||
+			    !d->width || !d->height || d->width > 8192 || d->height > 8192 ||
+			    d->num_fds < 1 || d->num_fds > 2 ||
+			    d->strides[0] < (int)(ALIGN(d->width, 2) * bytes) ||
+			    d->strides[0] != d->strides[1] || d->offsets[0] ||
+			    d->offsets[1] < 0 ||
+			    (uint64_t)d->offsets[1] < (uint64_t)d->strides[0] * d->height ||
 			    (d->num_fds > 1 && d->fds[1] != d->fds[0] && d->fds[1] >= 0)) {
 				errno = EINVAL;
 				return NULL;
@@ -271,8 +284,13 @@ EXPORT struct gbm_bo *gbm_bo_import(struct gbm_device *dev, uint32_t type, void 
 				return NULL;
 			n->dev = dev;
 			n->fd = fcntl(d->fds[0], F_DUPFD_CLOEXEC, 0);
+			if (n->fd < 0) {
+				free(n);
+				return NULL;
+			}
 			n->width = d->width;
 			n->height = d->height;
+			n->format = d->format;
 			n->pitch = (uint32_t)d->strides[0];
 			n->uv_offset = (uint32_t)d->offsets[1];
 			load_gbm_device_get_fd();
@@ -342,8 +360,9 @@ EXPORT uint32_t gbm_bo_get_stride_for_plane(struct gbm_bo *bo, int plane)
 
 EXPORT uint32_t gbm_bo_get_format(struct gbm_bo *bo)
 {
-	if (find(bo))
-		return FMT_NV12;
+	struct nv12 *n = find(bo);
+	if (n)
+		return n->format;
 	PASS(gbm_bo_get_format, bo);
 }
 

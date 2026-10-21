@@ -21,6 +21,8 @@
 #define DRM_FORMAT_NV12 FOURCC('N', 'V', '1', '2')
 #define DRM_FORMAT_R8 FOURCC('R', '8', ' ', ' ')
 #define DRM_FORMAT_GR88 FOURCC('G', 'R', '8', '8')
+#define DRM_FORMAT_R16 FOURCC('R', '1', '6', ' ')
+#define DRM_FORMAT_GR1616 FOURCC('G', 'R', '3', '2')
 
 /* The few DRM ioctls we need, without pulling libdrm in. */
 struct k_drm_version {
@@ -138,12 +140,24 @@ static VAStatus QueryConfigEntrypoints(VADriverContextP ctx, VAProfile p,
 	return VA_STATUS_SUCCESS;
 }
 
-static void fill_attribs(VAConfigAttrib *a, int n)
+static uint32_t rt_formats(struct drv *d, VAProfile p)
+{
+	return VA_RT_FORMAT_YUV420 |
+		(p == VAProfileAV1Profile0 && d->p010 ? VA_RT_FORMAT_YUV420_10 : 0);
+}
+
+static uint32_t surface_rt_format(uint32_t fourcc)
+{
+	return fourcc == VA_FOURCC_NV12 ? VA_RT_FORMAT_YUV420 :
+		fourcc == VA_FOURCC_P010 ? VA_RT_FORMAT_YUV420_10 : 0;
+}
+
+static void fill_attribs(struct drv *d, VAProfile p, VAConfigAttrib *a, int n)
 {
 	for (int i = 0; i < n; i++) {
 		switch (a[i].type) {
 		case VAConfigAttribRTFormat:
-			a[i].value = VA_RT_FORMAT_YUV420;
+			a[i].value = rt_formats(d, p);
 			break;
 		case VAConfigAttribDecSliceMode:
 			a[i].value = VA_DEC_SLICE_MODE_NORMAL;
@@ -166,7 +180,7 @@ static VAStatus GetConfigAttributes(VADriverContextP ctx, VAProfile p, VAEntrypo
 		return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 	if (e != VAEntrypointVLD)
 		return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
-	fill_attribs(a, n);
+	fill_attribs(DRV(ctx), p, a, n);
 	return VA_STATUS_SUCCESS;
 }
 
@@ -178,14 +192,19 @@ static VAStatus CreateConfig(VADriverContextP ctx, VAProfile p, VAEntrypoint e,
 		return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 	if (e != VAEntrypointVLD)
 		return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+	uint32_t formats = rt_formats(d, p), requested = formats;
 	for (int i = 0; i < n; i++)
-		if (a[i].type == VAConfigAttribRTFormat && !(a[i].value & VA_RT_FORMAT_YUV420))
-			return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+		if (a[i].type == VAConfigAttribRTFormat) {
+			if (!a[i].value || (a[i].value & ~formats))
+				return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+			requested = a[i].value;
+		}
 	struct config *c = calloc(1, sizeof(*c));
 	if (!c)
 		return VA_STATUS_ERROR_ALLOCATION_FAILED;
 	c->profile = p;
 	c->entrypoint = e;
+	c->rt_format = requested;
 	LOCK(d);
 	*id = obj_add(d, O_CONFIG, c);
 	UNLOCK(d);
@@ -215,20 +234,12 @@ static VAStatus QueryConfigAttributes(VADriverContextP ctx, VAConfigID id, VAPro
 	*p = c->profile;
 	*e = c->entrypoint;
 	a[0].type = VAConfigAttribRTFormat;
-	a[0].value = VA_RT_FORMAT_YUV420;
+	a[0].value = c->rt_format;
 	*n = 1;
 	return VA_STATUS_SUCCESS;
 }
 
 /* ---------------- surfaces ---------------- */
-
-static void layout_for(uint32_t w, uint32_t h, uint32_t *pitch, uint32_t *uv, uint32_t *size)
-{
-	/* What the iris/venus cores write for NV12. */
-	*pitch = ALIGN(w, 128);
-	*uv = *pitch * ALIGN(h, 32);
-	*size = ALIGN(*uv + *pitch * ALIGN((h + 1) / 2, 16), 4096);
-}
 
 static int alloc_dmabuf(struct drv *d, uint32_t size, uint32_t *gem)
 {
@@ -334,11 +345,16 @@ static VAStatus CreateSurfaces2(VADriverContextP ctx, unsigned int format, unsig
 	VADRMPRIMESurfaceDescriptor *prime2 = NULL;
 	VASurfaceAttribExternalBuffers *ext = NULL;
 
-	if (format != VA_RT_FORMAT_YUV420)
+	if (format != VA_RT_FORMAT_YUV420 &&
+	    !(format == VA_RT_FORMAT_YUV420_10 && d->av1 && d->p010))
 		return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+	uint32_t fourcc = format == VA_RT_FORMAT_YUV420_10 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+	uint32_t pitch, uv, size;
+	if (video_layout(fourcc, width, height, &pitch, &uv, &size))
+		return VA_STATUS_ERROR_INVALID_PARAMETER;
 	for (unsigned i = 0; i < nattr; i++) {
 		if (attr[i].type == VASurfaceAttribPixelFormat && attr[i].value.value.i &&
-		    (uint32_t)attr[i].value.value.i != VA_FOURCC_NV12)
+		    (uint32_t)attr[i].value.value.i != fourcc)
 			return VA_STATUS_ERROR_INVALID_IMAGE_FORMAT;
 		if (attr[i].type == VASurfaceAttribMemoryType)
 			mem = (uint32_t)attr[i].value.value.i;
@@ -366,8 +382,10 @@ static VAStatus CreateSurfaces2(VADriverContextP ctx, unsigned int format, unsig
 		s->slot = -1;
 		s->width = width;
 		s->height = height;
+		s->fourcc = fourcc;
 		if (prime2) {
-			if (prime2->num_objects < 1 || prime2->fourcc != VA_FOURCC_NV12) {
+			if (prime2->num_objects < 1 || prime2->fourcc != fourcc ||
+			    prime2->objects[0].drm_format_modifier != DRM_FORMAT_MOD_LINEAR) {
 				free(s);
 				goto bad;
 			}
@@ -398,7 +416,7 @@ static VAStatus CreateSurfaces2(VADriverContextP ctx, unsigned int format, unsig
 				s->size = (uint32_t)lseek(s->fd, 0, SEEK_END);
 			s->gem = import_gem(d, s->fd);
 		} else if (ext) {
-			if (n >= ext->num_buffers || ext->num_planes != 2 ||
+			if (ext->pixel_format != fourcc || n >= ext->num_buffers || ext->num_planes != 2 ||
 			    ext->pitches[0] != ext->pitches[1] || ext->offsets[0]) {
 				free(s);
 				goto bad;
@@ -410,12 +428,22 @@ static VAStatus CreateSurfaces2(VADriverContextP ctx, unsigned int format, unsig
 			s->imported = 1;
 			s->gem = import_gem(d, s->fd);
 		} else {
-			layout_for(width, height, &s->pitch, &s->uv_offset, &s->size);
+			s->pitch = pitch;
+			s->uv_offset = uv;
+			s->size = size;
 			s->fd = alloc_dmabuf(d, s->size, &s->gem);
 		}
 		if (s->fd < 0) {
 			free(s);
 			goto fail;
+		}
+		unsigned bytes = video_sample_bytes(fourcc);
+		if (s->pitch < ALIGN(width, 2) * bytes ||
+		    s->uv_offset < (uint64_t)s->pitch * height ||
+		    (uint64_t)s->uv_offset + (uint64_t)s->pitch * ((height + 1) / 2) > s->size) {
+			dbg(d, "import: buffer layout cannot hold %ux%u format %#x", width, height, fourcc);
+			surface_free(d, s);
+			goto bad;
 		}
 		LOCK(d);
 		out[n] = obj_add(d, O_SURFACE, s);
@@ -479,9 +507,11 @@ static VAStatus DestroySurfaces(VADriverContextP ctx, VASurfaceID *list, int num
 static VAStatus QuerySurfaceAttributes(VADriverContextP ctx, VAConfigID cfg,
 				       VASurfaceAttrib *a, unsigned int *num)
 {
-	(void)ctx;
-	(void)cfg;
-	const unsigned n = 7;
+	struct config *c = obj_get(DRV(ctx), O_CONFIG, cfg);
+	if (!c)
+		return VA_STATUS_ERROR_INVALID_CONFIG;
+	const unsigned n = 6 + !!(c->rt_format & VA_RT_FORMAT_YUV420) +
+			       !!(c->rt_format & VA_RT_FORMAT_YUV420_10);
 	if (!a) {
 		*num = n;
 		return VA_STATUS_SUCCESS;
@@ -492,10 +522,15 @@ static VAStatus QuerySurfaceAttributes(VADriverContextP ctx, VAConfigID cfg,
 	}
 	memset(a, 0, n * sizeof(*a));
 	int i = 0;
-	a[i].type = VASurfaceAttribPixelFormat;
-	a[i].flags = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;
-	a[i].value.type = VAGenericValueTypeInteger;
-	a[i++].value.value.i = VA_FOURCC_NV12;
+	const uint32_t formats[] = {VA_FOURCC_NV12, VA_FOURCC_P010};
+	for (unsigned f = 0; f < 2; f++) {
+		if (!(c->rt_format & surface_rt_format(formats[f])))
+			continue;
+		a[i].type = VASurfaceAttribPixelFormat;
+		a[i].flags = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;
+		a[i].value.type = VAGenericValueTypeInteger;
+		a[i++].value.value.i = formats[f];
+	}
 	a[i].type = VASurfaceAttribMinWidth;
 	a[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
 	a[i].value.type = VAGenericValueTypeInteger;
@@ -539,7 +574,7 @@ static VAStatus ExportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32
 	}
 	VADRMPRIMESurfaceDescriptor *o = desc;
 	memset(o, 0, sizeof(*o));
-	o->fourcc = VA_FOURCC_NV12;
+	o->fourcc = s->fourcc;
 	o->width = s->width;
 	o->height = s->height;
 	o->num_objects = 1;
@@ -548,16 +583,16 @@ static VAStatus ExportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32
 	o->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
 	if (flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) {
 		o->num_layers = 2;
-		o->layers[0].drm_format = DRM_FORMAT_R8;
+		o->layers[0].drm_format = s->fourcc == VA_FOURCC_P010 ? DRM_FORMAT_R16 : DRM_FORMAT_R8;
 		o->layers[0].num_planes = 1;
 		o->layers[0].pitch[0] = s->pitch;
-		o->layers[1].drm_format = DRM_FORMAT_GR88;
+		o->layers[1].drm_format = s->fourcc == VA_FOURCC_P010 ? DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
 		o->layers[1].num_planes = 1;
 		o->layers[1].offset[0] = s->uv_offset;
 		o->layers[1].pitch[0] = s->pitch;
 	} else {
 		o->num_layers = 1;
-		o->layers[0].drm_format = DRM_FORMAT_NV12;
+		o->layers[0].drm_format = s->fourcc;
 		o->layers[0].num_planes = 2;
 		o->layers[0].pitch[0] = s->pitch;
 		o->layers[0].offset[1] = s->uv_offset;
@@ -741,6 +776,10 @@ static VAStatus BeginPicture(VADriverContextP ctx, VAContextID cid, VASurfaceID 
 		UNLOCK(d);
 		return c ? VA_STATUS_ERROR_INVALID_SURFACE : VA_STATUS_ERROR_INVALID_CONTEXT;
 	}
+	if (!(c->cfg.rt_format & surface_rt_format(s->fourcc))) {
+		UNLOCK(d);
+		return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+	}
 	if (s->pending && s->ctx == c)
 		dec_wait(c, s, 1000);
 	s->ctx = c;
@@ -810,6 +849,11 @@ static VAStatus render_av1(struct context *c, struct buffer *b)
 	case VAPictureParameterBufferType:
 		memset(&c->av1, 0, sizeof(c->av1));
 		memcpy(&c->av1, b->data, b->size < sizeof(c->av1) ? b->size : sizeof(c->av1));
+		if (c->av1.bit_depth_idx > 1 ||
+		    c->target->fourcc != (c->av1.bit_depth_idx ? VA_FOURCC_P010 : VA_FOURCC_NV12)) {
+			dbg(c->drv, "av1: picture bit depth does not match its surface");
+			return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+		}
 		c->have_pic = 1;
 		break;
 	case VASliceParameterBufferType: {
@@ -1032,13 +1076,13 @@ static VAStatus QuerySurfaceError(VADriverContextP ctx, VASurfaceID sid, VAStatu
 
 /* ---------------- images ---------------- */
 
-static void image_fill(VAImage *im, uint32_t w, uint32_t h, uint32_t pitch, uint32_t uv,
+static void image_fill(VAImage *im, uint32_t fourcc, uint32_t w, uint32_t h, uint32_t pitch, uint32_t uv,
 		       uint32_t size)
 {
 	memset(im, 0, sizeof(*im));
-	im->format.fourcc = VA_FOURCC_NV12;
+	im->format.fourcc = fourcc;
 	im->format.byte_order = VA_LSB_FIRST;
-	im->format.bits_per_pixel = 12;
+	im->format.bits_per_pixel = 12 * video_sample_bytes(fourcc);
 	im->width = (uint16_t)w;
 	im->height = (uint16_t)h;
 	im->data_size = size;
@@ -1050,12 +1094,17 @@ static void image_fill(VAImage *im, uint32_t w, uint32_t h, uint32_t pitch, uint
 
 static VAStatus QueryImageFormats(VADriverContextP ctx, VAImageFormat *list, int *num)
 {
-	(void)ctx;
-	memset(list, 0, sizeof(*list));
+	int count = DRV(ctx)->p010 ? 2 : 1;
+	memset(list, 0, count * sizeof(*list));
 	list[0].fourcc = VA_FOURCC_NV12;
 	list[0].byte_order = VA_LSB_FIRST;
 	list[0].bits_per_pixel = 12;
-	*num = 1;
+	if (count == 2) {
+		list[1].fourcc = VA_FOURCC_P010;
+		list[1].byte_order = VA_LSB_FIRST;
+		list[1].bits_per_pixel = 24;
+	}
+	*num = count;
 	return VA_STATUS_SUCCESS;
 }
 
@@ -1089,10 +1138,15 @@ static VAStatus new_image(struct drv *d, VAImage *im, struct surface *derived)
 
 static VAStatus CreateImage(VADriverContextP ctx, VAImageFormat *fmt, int w, int h, VAImage *im)
 {
-	if (fmt->fourcc != VA_FOURCC_NV12)
+	if (fmt->fourcc != VA_FOURCC_NV12 &&
+	    !(fmt->fourcc == VA_FOURCC_P010 && DRV(ctx)->p010))
 		return VA_STATUS_ERROR_INVALID_IMAGE_FORMAT;
-	uint32_t pitch = ALIGN((uint32_t)w, 16), uv = pitch * ALIGN((uint32_t)h, 2);
-	image_fill(im, (uint32_t)w, (uint32_t)h, pitch, uv, uv + pitch * ((uint32_t)h + 1) / 2);
+	if (w <= 0 || h <= 0 || w > 8192 || h > 8192)
+		return VA_STATUS_ERROR_INVALID_PARAMETER;
+	uint32_t pitch = ALIGN((uint32_t)w * video_sample_bytes(fmt->fourcc), 16);
+	uint32_t uv = pitch * ALIGN((uint32_t)h, 2);
+	image_fill(im, fmt->fourcc, (uint32_t)w, (uint32_t)h, pitch, uv,
+		   uv + pitch * (((uint32_t)h + 1) / 2));
 	im->format = *fmt;
 	return new_image(DRV(ctx), im, NULL);
 }
@@ -1108,7 +1162,7 @@ static VAStatus DeriveImage(VADriverContextP ctx, VASurfaceID sid, VAImage *im)
 		dec_wait(s->ctx, s, 1000);
 		UNLOCK(d);
 	}
-	image_fill(im, s->width, s->height, s->pitch, s->uv_offset, s->size);
+	image_fill(im, s->fourcc, s->width, s->height, s->pitch, s->uv_offset, s->size);
 	return new_image(d, im, s);
 }
 
@@ -1138,6 +1192,8 @@ static VAStatus GetImage(VADriverContextP ctx, VASurfaceID sid, int x, int y, un
 		return VA_STATUS_ERROR_INVALID_SURFACE;
 	if (!i)
 		return VA_STATUS_ERROR_INVALID_IMAGE;
+	if (s->fourcc != i->va.format.fourcc)
+		return VA_STATUS_ERROR_INVALID_IMAGE_FORMAT;
 	struct buffer *b = obj_get(d, O_BUFFER, i->va.buf);
 	if (!b || !b->data)
 		return VA_STATUS_ERROR_INVALID_BUFFER;
@@ -1147,7 +1203,8 @@ static VAStatus GetImage(VADriverContextP ctx, VASurfaceID sid, int x, int y, un
 	UNLOCK(d);
 	if (surf_map(s))
 		return VA_STATUS_ERROR_OPERATION_FAILED;
-	if ((uint32_t)x + w > s->width || (uint32_t)y + h > s->height ||
+	if (x < 0 || y < 0 || (uint32_t)x > s->width || (uint32_t)y > s->height ||
+	    w > s->width - (uint32_t)x || h > s->height - (uint32_t)y ||
 	    w > i->va.width || h > i->va.height)
 		return VA_STATUS_ERROR_INVALID_PARAMETER;
 	x &= ~1;
@@ -1155,12 +1212,14 @@ static VAStatus GetImage(VADriverContextP ctx, VASurfaceID sid, int x, int y, un
 	struct dma_buf_sync sy = {.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
 	ioctl(s->fd, DMA_BUF_IOCTL_SYNC, &sy);
 	const uint8_t *src = (const uint8_t *)s->map;
+	unsigned bytes = video_sample_bytes(s->fourcc);
 	for (unsigned r = 0; r < h; r++)
 		memcpy(b->data + i->va.offsets[0] + (size_t)r * i->va.pitches[0],
-		       src + (size_t)(y + r) * s->pitch + x, w);
+		       src + (size_t)(y + r) * s->pitch + (size_t)x * bytes, w * bytes);
 	for (unsigned r = 0; r < (h + 1) / 2; r++)
 		memcpy(b->data + i->va.offsets[1] + (size_t)r * i->va.pitches[1],
-		       src + s->uv_offset + (size_t)(y / 2 + r) * s->pitch + x, w);
+		       src + s->uv_offset + (size_t)(y / 2 + r) * s->pitch + (size_t)x * bytes,
+		       ALIGN(w, 2) * bytes);
 	sy.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
 	ioctl(s->fd, DMA_BUF_IOCTL_SYNC, &sy);
 	return VA_STATUS_SUCCESS;
@@ -1238,6 +1297,7 @@ VAStatus __attribute__((visibility("default"))) __vaDriverInit_1_17(VADriverCont
 		return VA_STATUS_ERROR_UNKNOWN;
 	}
 	d->av1 = !getenv("MSM_VA_NO_AV1") && dec_has_av1(d->dec_path);
+	d->p010 = d->av1 && dec_has_p010(d->dec_path);
 	dbg(d, "decoder %s%s", d->dec_path, d->av1 ? " (AV1 too)" : "");
 
 	ctx->pDriverData = d;
@@ -1246,7 +1306,7 @@ VAStatus __attribute__((visibility("default"))) __vaDriverInit_1_17(VADriverCont
 	ctx->max_profiles = MAX_PROFILES;
 	ctx->max_entrypoints = 1;
 	ctx->max_attributes = 8;
-	ctx->max_image_formats = 1;
+	ctx->max_image_formats = 2;
 	ctx->max_subpic_formats = 1;
 	ctx->max_display_attributes = 1;
 	ctx->str_vendor = VENDOR;

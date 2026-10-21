@@ -6,7 +6,7 @@
  * clients' surfaces as dma-bufs and only the current target is queued, so
  * the firmware writes the picture straight into the surface VA was told to
  * use. When a surface's layout doesn't match what the hardware writes
- * (pitch a multiple of 128, chroma at pitch * height rounded up to 32), the
+ * (pitch a multiple of 128, or 256 for P010, chroma after 32-aligned rows), the
  * context falls back to driver-owned capture buffers and copies.
  */
 #include <errno.h>
@@ -37,17 +37,27 @@ static int xioctl(int fd, unsigned long req, void *arg)
 #define V4L2_PIX_FMT_AV1 v4l2_fourcc('A', 'V', '0', '1')
 #endif
 
-int dec_has_av1(const char *path)
+static int dec_has_format(const char *path, uint32_t type, uint32_t format)
 {
 	int fd = open(path, O_RDWR | O_CLOEXEC), ok = 0;
 	if (fd < 0)
 		return 0;
-	struct v4l2_fmtdesc f = {.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
+	struct v4l2_fmtdesc f = {.type = type};
 	for (f.index = 0; !xioctl(fd, VIDIOC_ENUM_FMT, &f); f.index++)
-		if (f.pixelformat == V4L2_PIX_FMT_AV1)
+		if (f.pixelformat == format)
 			ok = 1;
 	close(fd);
 	return ok;
+}
+
+int dec_has_av1(const char *path)
+{
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_PIX_FMT_AV1);
+}
+
+int dec_has_p010(const char *path)
+{
+	return dec_has_format(path, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_PIX_FMT_P010);
 }
 
 int dec_find(char *path, size_t len)
@@ -347,14 +357,26 @@ static int cap_setup(struct context *c, struct surface *target)
 	    f.fmt.pix_mp.plane_fmt[0].bytesperline, f.fmt.pix_mp.plane_fmt[0].sizeimage);
 
 	/* Ask for the target's own layout; the hardware rounds it the same way. */
-	f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
-	if (target->pitch >= w && target->uv_offset % target->pitch == 0 &&
+	unsigned bytes = video_sample_bytes(target->fourcc);
+	if (!bytes) {
+		dbg(c->drv, "unsupported capture surface format %#x", target->fourcc);
+		return -1;
+	}
+	uint32_t format = target->fourcc == VIDEO_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+	f.fmt.pix_mp.pixelformat = format;
+	if (target->pitch / bytes >= w && target->uv_offset % target->pitch == 0 &&
 	    target->uv_offset / target->pitch >= h) {
-		f.fmt.pix_mp.width = target->pitch;
+		f.fmt.pix_mp.width = target->pitch / bytes;
 		f.fmt.pix_mp.height = target->uv_offset / target->pitch;
 	}
 	if (xioctl(c->fd, VIDIOC_S_FMT, &f))
 		return -1;
+	if (f.fmt.pix_mp.pixelformat != format) {
+		dbg(c->drv, "capture format %#x requested, decoder returned %#x",
+		    format, f.fmt.pix_mp.pixelformat);
+		return -1;
+	}
+	c->cap_fourcc = target->fourcc;
 	c->cap_pitch = f.fmt.pix_mp.plane_fmt[0].bytesperline;
 	c->cap_height = f.fmt.pix_mp.height;
 	c->cap_size = f.fmt.pix_mp.plane_fmt[0].sizeimage;
@@ -465,6 +487,10 @@ static struct surface *find_pending(struct context *c, uint64_t ts)
 
 int dec_submit(struct context *c, const uint8_t *data, size_t len, struct surface *target)
 {
+	if (c->cap_ready && c->cap_fourcc != target->fourcc) {
+		dbg(c->drv, "surface bit depth changed within a decoder context");
+		return -1;
+	}
 	int idx = -1;
 	for (int tries = 0; idx < 0 && tries < 100; tries++) {
 		reclaim_output(c);

@@ -333,8 +333,12 @@ done
 # --backend wayland/sdl would nest inside another compositor and drop the panel.
 GAMESCOPE_ARGS=(
   --backend drm
-  --prefer-output "$OUTPUT"
 )
+if [[ "$IS_ODIN3" == 1 && "$GAMESCOPE_FORCE_INTERNAL" != 1 ]]; then
+  GAMESCOPE_ARGS+=(--prefer-output "DP-1,HDMI-A-1,${OUTPUT}")
+else
+  GAMESCOPE_ARGS+=(--prefer-output "$OUTPUT")
+fi
 if [[ "$GAMESCOPE_FORCE_INTERNAL" == 1 ]]; then
   GAMESCOPE_ARGS+=(--force-internal)
 fi

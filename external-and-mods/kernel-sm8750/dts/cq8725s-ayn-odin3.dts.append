@@ -90,3 +90,7 @@
 		platform { sound-dai = <&q6apm>; };
 	};
 };
+
+&{/pmic-glink/connector@0} {
+	try-power-role = "sink";
+};

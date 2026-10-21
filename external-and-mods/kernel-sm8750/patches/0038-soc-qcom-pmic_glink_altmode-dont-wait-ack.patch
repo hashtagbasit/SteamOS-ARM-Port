@@ -1,0 +1,30 @@
+From: Chaz Bailey <charles.s.bailey@gmail.com>
+Subject: [PATCH] soc: qcom: pmic_glink_altmode: do not wait for ack on PAN_ACK
+
+ALTMODE_PAN_ACK (0x11) is an acknowledgement sent by the host to the
+firmware. Waiting for an acknowledgement of an acknowledgement is invalid
+and causes a 5-second timeout on firmware versions that do not generate
+a reply. Make ALTMODE_PAN_ACK fire-and-forget, and do not fail initialization
+if ALTMODE_PAN_EN times out.
+
+Signed-off-by: Chaz Bailey <charles.s.bailey@gmail.com>
+---
+--- a/drivers/soc/qcom/pmic_glink_altmode.c
++++ b/drivers/soc/qcom/pmic_glink_altmode.c
+@@ -164,10 +164,13 @@
+ 		return ret;
+ 	}
+ 
+-	left = wait_for_completion_timeout(&altmode->pan_ack, 5 * HZ);
++	if (cmd == ALTMODE_PAN_ACK)
++		return 0;
++
++	left = wait_for_completion_timeout(&altmode->pan_ack, 2 * HZ);
+ 	if (!left) {
+-		dev_err(altmode->dev, "timeout waiting for altmode request ack for: %#x\n", cmd);
+-		return -ETIMEDOUT;
++		dev_warn(altmode->dev, "timeout waiting for altmode request ack for: %#x (continuing)\n", cmd);
++		return 0;
+ 	}
+ 
+ 	return 0;

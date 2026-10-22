@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Steam + A opens Quick Access on the Retroid 865 boards (the Flip 2 has no
+Quick Access button). An InputPlumber chord would swallow the single presses
+of both buttons, so this only reads InputPlumber's virtual Steam Deck
+controller, without grabbing it, and asks InputPlumber to press QuickAccess.
+"""
+import glob
+import os
+import re
+import select
+import subprocess
+import time
+
+IP = "org.shadowblip.InputPlumber"
+A = (8, 0x80)        # Deck input report: byte, bit
+STEAM = (9, 0x20)
+
+
+def log(msg: str) -> None:
+    print(f"retroid-qam-chord: {msg}", flush=True)
+
+
+def find_hidraw() -> str | None:
+    for h in glob.glob("/sys/class/hidraw/hidraw*"):
+        try:
+            uevent = open(f"{h}/device/uevent", encoding="utf-8").read()
+        except OSError:
+            continue
+        if "HID_NAME=Generic Steam Controller" in uevent:
+            return f"/dev/{os.path.basename(h)}"
+    return None
+
+
+def quick_access() -> None:
+    tree = subprocess.run(["busctl", "--system", "--list", "tree", IP],
+                          capture_output=True, text=True, timeout=5).stdout
+    for path in re.findall(r"^/org/shadowblip/InputPlumber/CompositeDevice\d+$", tree, re.M):
+        r = subprocess.run(["busctl", "--system", "call", IP, path,
+                            "org.shadowblip.Input.CompositeDevice", "SendButtonChord",
+                            "as", "1", "Gamepad:Button:QuickAccess"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            return
+    log("no composite device took the Quick Access press")
+
+
+def held(report: bytes, button: tuple[int, int]) -> bool:
+    return bool(report[button[0]] & button[1])
+
+
+def watch(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    log(f"watch {path}")
+    pending = False
+    last = 0.0
+    try:
+        while True:
+            select.select([fd], [], [])
+            report = os.read(fd, 64)
+            if len(report) < 16 or report[2] != 0x09:
+                continue
+            if held(report, STEAM) and held(report, A):
+                pending = True
+            # Steam ignores Quick Access while its own button is down: press
+            # it once both are let go. Our own press shows up in these reports
+            # too, so at most once a second.
+            elif pending and not held(report, STEAM) and not held(report, A):
+                pending = False
+                if time.monotonic() - last > 1.0:
+                    last = time.monotonic()
+                    log("Steam + A")
+                    quick_access()
+    finally:
+        os.close(fd)
+
+
+def main() -> None:
+    while True:
+        path = find_hidraw()
+        if path:
+            try:
+                watch(path)
+            except OSError as e:
+                log(f"lost {path}: {e}")
+        time.sleep(2)  # InputPlumber recreates the controller when it restarts
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,16 @@
+# Steam + A opens Quick Access on the Retroid 865 boards. Started with Game
+# Mode by gamescope-session.target.d/99-sm8250-qam-chord.conf.
+[Unit]
+Description=Steam + A opens Quick Access (Retroid 865)
+PartOf=gamescope-session.target
+After=gamescope-session.service
+ConditionFirmware=|device-tree-compatible(retroidpocket,rp5)
+ConditionFirmware=|device-tree-compatible(retroidpocket,rpflip2)
+ConditionFirmware=|device-tree-compatible(retroidpocket,rpmini)
+ConditionFirmware=|device-tree-compatible(retroidpocket,rpminiv2)
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/lib/steamos-arm/retroid-qam-chord
+Restart=on-failure
+RestartSec=2
+Slice=session.slice

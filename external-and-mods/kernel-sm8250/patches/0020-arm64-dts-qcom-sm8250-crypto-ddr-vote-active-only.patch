@@ -1,0 +1,24 @@
+Subject: [PATCH] arm64: dts: qcom: sm8250: make the crypto engine's DDR vote active-only
+
+The QCE votes 393600 kBps on its path to DDR with tag 0, which icc-rpmh
+treats as QCOM_ICC_TAG_ALWAYS, and the driver has no runtime PM: the
+vote is taken at probe and never dropped. It goes into the RPMh sleep
+set, so MC0 and SH0 stay voted through s2idle and DDR never enters
+self-refresh (the APPS sleep set on a Retroid Pocket Flip 2 had MC0 and
+SH0 non-zero; with the QCE unbound both went to 0).
+
+The engine only moves data while a CPU drives it, so tag the path
+QCOM_ICC_TAG_ACTIVE_ONLY, like the CPU paths (0016).
+
+---
+--- a/arch/arm64/boot/dts/qcom/sm8250.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8250.dtsi
+@@ -2643,7 +2643,7 @@
+ 				 <&apps_smmu 0x59f 0x0000>,
+ 				 <&apps_smmu 0x586 0x0011>,
+ 				 <&apps_smmu 0x596 0x0011>;
+-			interconnects = <&aggre2_noc MASTER_CRYPTO_CORE_0 0 &mc_virt SLAVE_EBI_CH0 0>;
++			interconnects = <&aggre2_noc MASTER_CRYPTO_CORE_0 QCOM_ICC_TAG_ACTIVE_ONLY &mc_virt SLAVE_EBI_CH0 QCOM_ICC_TAG_ACTIVE_ONLY>;
+ 			interconnect-names = "memory";
+ 		};
+ 

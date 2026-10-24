@@ -51,3 +51,8 @@
 &usb_1_qmpphy_out {
 	remote-endpoint = <&usbc_redriver_phy>;
 };
+
+/* No camera; its critical gdsc clock held the XO and MMCX through s2idle. */
+&camcc {
+	status = "disabled";
+};

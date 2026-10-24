@@ -17,6 +17,9 @@ set -u
 
 TOUCH_DRV=/sys/bus/i2c/drivers/chipone-tddi
 WIFI_MODS=(ath12k_wifi7 ath12k)
+# The 865's QCA6390 is an ath11k card.
+tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | grep -qx 'qcom,sm8250' \
+  && WIFI_MODS=(ath11k_pci ath11k)
 UID_STEAM=1000
 
 log() { echo "konkr-sleep: $*"; }

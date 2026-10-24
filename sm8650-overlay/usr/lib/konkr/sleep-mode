@@ -9,13 +9,15 @@
 #                                          kernel (it carries the s2idle
 #                                          fixes; 2026-10-04 on a Pocket FIT),
 #                                          8 Gen 2 too (an AYN Thor: 5 % in 6 h
-#                                          asleep, lid wakes it), standby
-#                                          everywhere else
+#                                          asleep, lid wakes it), the Retroid
+#                                          865 boards too (Flip 2: 1.3 %/h),
+#                                          standby everywhere else
 [ -e /var/lib/konkrd/sleep-standby ] && { echo standby; exit 0; }
 if [ -e /var/lib/konkrd/sleep-s2idle ] || [ -e /run/konkr/s2idle ]; then
   echo s2idle; exit 0
 fi
-if tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | grep -qx -e 'qcom,sm8650' -e 'qcom,sm8550'; then
+if tr '\0' '\n' </proc/device-tree/compatible 2>/dev/null | grep -qx -e 'qcom,sm8650' -e 'qcom,sm8550' \
+     -e 'retroidpocket,rp5' -e 'retroidpocket,rpflip2' -e 'retroidpocket,rpmini' -e 'retroidpocket,rpminiv2'; then
   case "$(uname -r)" in
     7.[2-9].*|7.[1-9][0-9].*|[89].*) echo s2idle; exit 0 ;;
   esac

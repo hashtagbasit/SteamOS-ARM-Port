@@ -1,0 +1,83 @@
+From: hashtagbasit
+Subject: tty: serial: qcom-geni: release a port's CX and bus votes across system suspend
+
+An open geni UART keeps the performance level its clock rate needs on the CX
+rail (dev_pm_opp_set_rate() with the port's rate) and its interconnect
+bandwidth for as long as it is open. Nothing drops either for system suspend:
+only the console's bandwidth vote is switched to active-only. On a Pocket FIT
+three ports stay open all the time (Bluetooth, the controller MCU and the
+debug console), and their levels (128, 64 and 64) are still voted while the
+system sleeps, so RPMh never collapses CX: the cxsd, aosd and ddr sleep
+counters stayed at 0 through every s2idle, even with sync_state forced and
+the USB and PCIe controllers unbound.
+
+The port is stopped by then (uart_suspend_port() has run, and these UARTs are
+not wakeup sources), so after it let go of the performance level and make the
+bandwidth vote active-only for every port, the way the console already does,
+and put both back before uart_resume_port() starts it again.
+
+---
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -1983,6 +1983,7 @@
+ 	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
+ 	struct uart_port *uport = &port->uport;
+ 	struct qcom_geni_private_data *private_data = uport->private_data;
++	int ret;
+ 
+ 	/*
+ 	 * A peer that keeps streaming into a non-console geni UART across the
+@@ -2000,16 +2001,25 @@
+ 	 */
+ 	if (!uart_console(uport))
+ 		disable_irq(uport->irq);
++
++	ret = uart_suspend_port(private_data->drv, uport);
++	if (ret)
++		return ret;
+ 
+ 	/*
+-	 * This is done so we can hit the lowest possible state in suspend
+-	 * even with no_console_suspend
++	 * An open port still votes its CX level and bus bandwidth here, and
++	 * those stay in RPMh's sleep set: any open UART keeps the SoC out of
++	 * CX collapse. Leave nothing voted while the system sleeps (the port
++	 * is stopped), for every port, not only the console. Bandwidth stays
++	 * up while the CPUs run, so a console with no_console_suspend still
++	 * prints.
+ 	 */
+-	if (uart_console(uport)) {
+-		geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ACTIVE_ONLY);
+-		geni_icc_set_bw(&port->se);
+-	}
+-	return uart_suspend_port(private_data->drv, uport);
++	geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ACTIVE_ONLY);
++	geni_icc_set_bw(&port->se);
++	if (port->clk_rate)
++		dev_pm_opp_set_rate(dev, 0);
++
++	return 0;
+ }
+ 
+ static int qcom_geni_serial_resume(struct device *dev)
+@@ -2019,14 +2029,16 @@
+ 	struct uart_port *uport = &port->uport;
+ 	struct qcom_geni_private_data *private_data = uport->private_data;
+ 
++	/* Votes back before the port runs again (see qcom_geni_serial_suspend()). */
++	if (port->clk_rate)
++		dev_pm_opp_set_rate(dev, port->clk_rate);
++	geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ALWAYS);
++	geni_icc_set_bw(&port->se);
++
+ 	ret = uart_resume_port(private_data->drv, uport);
+ 	/* Balance the disable_irq() taken in qcom_geni_serial_suspend(). */
+ 	if (!uart_console(uport))
+ 		enable_irq(uport->irq);
+-	if (uart_console(uport)) {
+-		geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ALWAYS);
+-		geni_icc_set_bw(&port->se);
+-	}
+ 	return ret;
+ }
+ 

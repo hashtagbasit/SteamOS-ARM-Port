@@ -1,0 +1,28 @@
+Subject: [PATCH] scsi: ufs: core: mark the link off when the host is removed
+
+ufshcd_remove() stops the host controller but leaves the link state as
+it was, so ufshcd_hba_exit() still sees an active link and
+ufshcd_setup_clocks() skips the clocks marked keep_link_active. On
+ufs-qcom that is core_clk_unipro: after an unbind it stays prepared
+with nobody to release it, and the next bind takes a new reference.
+
+On SM8250 the unipro RCG runs from gpll0 once clock scaling is off,
+which keeps gpll0 and the XO prepared. A Retroid Pocket Flip 2 that
+unbinds its idle UFS for s2idle never reached XO shutdown: the cxsd,
+aosd and ddr sleep counters stayed at 0.
+
+The link is down once the host is stopped, so say so before the
+teardown turns the clocks off.
+
+---
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -10851,6 +10851,8 @@
+ 	/* disable interrupts */
+ 	ufshcd_disable_intr(hba, hba->intr_mask);
+ 	ufshcd_hba_stop(hba);
++	/* Or ufshcd_hba_exit() leaves the keep_link_active clocks prepared. */
++	ufshcd_set_link_off(hba);
+ 	ufshcd_hba_exit(hba);
+ }
+ EXPORT_SYMBOL_GPL(ufshcd_remove);

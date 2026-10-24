@@ -1,0 +1,63 @@
+Subject: [PATCH] ASoC: qcom: q6afe: keep the handle of an LPASS core vote
+
+The ADSP answers AFE_CMD_REMOTE_LPASS_CORE_HW_VOTE_REQUEST with the
+vote's client handle, which the devote request has to send back. The
+callback read that reply as a basic result (the handle as the status)
+and q6afe_vote_lpass_core_hw() never filled in *client_handle, so every
+devote went out with handle 0 and the ADSP refused it:
+
+  qcom-q6afe aprsvc:service:4:4: cmd = 0x100f6 returned error = 0x1
+  qcom-q6afe aprsvc:service:4:4: Unknown cmd 0x100f6
+
+Each LPASS_HW_MACRO and LPASS_HW_DCODEC vote was then held for good,
+and the ADSP kept LPASS up and never power collapsed once the codec
+macros had probed. On a Retroid Pocket Flip 2 (SM8250) its qcom_stats
+sleep count stopped as the macros bound and never moved again.
+
+Store the handle from the reply and hand it to the caller, as the
+downstream driver does, and don't report the devote's basic result as
+an unknown command.
+
+---
+--- a/sound/soc/qcom/qdsp6/q6afe.c
++++ b/sound/soc/qcom/qdsp6/q6afe.c
+@@ -379,6 +379,7 @@
+ 	struct q6core_svc_api_info ainfo;
+ 	struct mutex lock;
+ 	struct aprv2_ibasic_rsp_result_t result;
++	uint32_t vote_handle;
+ 	wait_queue_head_t wait;
+ 	struct list_head port_list;
+ 	spinlock_t port_list_lock;
+@@ -994,6 +995,8 @@
+ 				wake_up(&afe->wait);
+ 			}
+ 			break;
++		case AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST:
++			break;
+ 		default:
+ 			dev_err(afe->dev, "Unknown cmd 0x%x\n",	res->opcode);
+ 			break;
+@@ -1001,8 +1004,12 @@
+ 	}
+ 		break;
+ 	case AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST:
++		/* The payload is the vote's client handle, not a status */
++		if (data->payload_size < sizeof(afe->vote_handle))
++			break;
++		afe->vote_handle = *(uint32_t *)data->payload;
+ 		afe->result.opcode = hdr->opcode;
+-		afe->result.status = res->status;
++		afe->result.status = 0;
+ 		wake_up(&afe->wait);
+ 		break;
+ 	default:
+@@ -1899,6 +1906,8 @@
+ 			       AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST);
+ 	if (ret)
+ 		dev_err(afe->dev, "AFE failed to vote (%d)\n", hw_block_id);
++	else
++		*client_handle = afe->vote_handle;
+ 
+ 	return ret;
+ }

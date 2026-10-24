@@ -1,0 +1,31 @@
+From: hashtagbasit
+Subject: scsi: ufs: qcom: keep the lane clock enables balanced
+
+ufs_qcom_disable_lane_clks() returns early when the lane clocks are already
+off, but ufs_qcom_enable_lane_clks() has no such check. Coming out of a
+runtime or system suspend, ufs_qcom_resume() enables them and then
+ufs_qcom_setup_clocks() enables them again for a link in hibern8, while the
+next suspend disables them only once. Every cycle leaves one more prepare and
+enable count on the UFS PHY symbol and AHB clocks.
+
+On a Pocket FIT running from its internal UFS the counts were 43 a few
+minutes after boot and 58 after one 2.4 minute s2idle. Those clocks never
+turn off, so XO stays on and the SoC never gets past CPU cluster collapse:
+the RPMh cxsd, aosd and ddr sleep counters stayed at 0 across the sleep.
+
+Make the enable mirror the disable: do nothing when the clocks are already
+on, so is_lane_clks_enabled tracks a single reference.
+
+---
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -356,6 +356,9 @@
+ {
+ 	int err;
+
++	if (host->is_lane_clks_enabled)
++		return 0;
++
+ 	err = clk_bulk_prepare_enable(host->num_clks, host->clks);
+ 	if (err)
+ 		return err;

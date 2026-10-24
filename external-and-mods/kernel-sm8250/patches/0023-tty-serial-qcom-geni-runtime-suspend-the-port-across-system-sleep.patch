@@ -1,0 +1,44 @@
+Subject: [PATCH] tty: serial: qcom-geni: runtime-suspend the port across system sleep
+
+uart_suspend_port() turns an open port off through qcom_geni_serial_pm(),
+which only does pm_runtime_put_sync(). During system sleep the PM core
+holds a runtime PM reference from device_prepare(), so the put never
+runtime-suspends the port and geni_serial_resources_off() never runs: the
+SE clock stays prepared, and with it gpll0 and the XO.
+
+On a Retroid Pocket Flip 2 the three open UARTs (Bluetooth, the gamepad
+MCU and the debug console) kept gcc_qupv3_wrap0_s6, wrap1_s4 and
+wrap2_s2 prepared into s2idle. bi_tcxo never unprepared, RPMh never saw
+an XO vote drop, and the cxsd, aosd and ddr sleep counters stayed at 0.
+
+Force the runtime suspend after uart_suspend_port(), and undo it before
+the port is resumed. A console with no_console_suspend keeps printing, so
+it is left alone.
+
+---
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -2019,6 +2019,10 @@
+ 	if (port->clk_rate)
+ 		dev_pm_opp_set_rate(dev, 0);
+ 
++	/* The PM core holds a runtime reference, so put_sync didn't suspend it. */
++	if (!uart_console(uport) || console_suspend_enabled)
++		return pm_runtime_force_suspend(dev);
++
+ 	return 0;
+ }
+ 
+@@ -2029,6 +2033,12 @@
+ 	struct uart_port *uport = &port->uport;
+ 	struct qcom_geni_private_data *private_data = uport->private_data;
+ 
++	if (!uart_console(uport) || console_suspend_enabled) {
++		ret = pm_runtime_force_resume(dev);
++		if (ret)
++			return ret;
++	}
++
+ 	/* Votes back before the port runs again (see qcom_geni_serial_suspend()). */
+ 	if (port->clk_rate)
+ 		dev_pm_opp_set_rate(dev, port->clk_rate);
